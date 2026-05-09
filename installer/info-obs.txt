@@ -1,0 +1,5 @@
+This software bundles OBS Studio, which is licensed under the GNU General Public License v2.0 (GPL-2.0).
+
+OBS Studio source code: https://github.com/obsproject/obs-studio
+
+By continuing the installation, you acknowledge the inclusion of OBS Studio and its license terms.

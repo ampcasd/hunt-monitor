@@ -1,0 +1,3 @@
+For the app to work, keep your Hunt Analyser panel open and visible in Tibia.
+
+Try not to move or cover it with other windows too often, as the app reads it via screen capture.

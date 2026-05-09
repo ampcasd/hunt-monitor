@@ -1,0 +1,5 @@
+{
+  "supabaseUrl": "https://your-project.supabase.co",
+  "supabaseAnonKey": "your-public-anon-key",
+  "apiBaseUrl": "https://www.tibiasquare.com"
+}

@@ -1,0 +1,14 @@
+OBS Studio
+==========
+
+This application bundles OBS Studio, which is used for game window capture.
+OBS Studio is free and open source software.
+
+Website: https://obsproject.com
+Source Code: https://github.com/obsproject/obs-studio
+License: GNU General Public License v2.0 (GPL-2.0)
+
+Full license text: https://github.com/obsproject/obs-studio/blob/master/COPYING
+
+OBS Studio is distributed as a separate program alongside this application.
+It is not modified. Communication occurs via the OBS WebSocket protocol.

@@ -1,0 +1,21 @@
+<Window x:Class="TibiaSquare.HuntMonitor.Tray.TrayMenuWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        AllowsTransparency="True"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Topmost="True"
+        ShowActivated="False"
+        Background="Transparent"
+        Width="260"
+        PreviewKeyDown="OnPreviewKeyDown">
+    <Border Background="#111113"
+            BorderBrush="#1f1f23"
+            BorderThickness="1"
+            CornerRadius="10"
+            Padding="0,2,0,8"
+            x:Name="MenuBorder">
+        <StackPanel x:Name="MenuPanel" />
+    </Border>
+</Window>

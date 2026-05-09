@@ -1,0 +1,4 @@
+# SHA-256 checksums for OBS Studio Windows portable zips.
+# Format: <version> <sha256>
+# Update this file when bumping desktop/obs-version.txt.
+31.0.2 64c47f7240805989c70f7d1222354408f7286fd377bf6744f10a0a5652d67d1a
