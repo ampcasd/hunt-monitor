@@ -54,12 +54,6 @@ public sealed class ToastNotificationService : IDisposable
             $"{syncedCount} pending session{(syncedCount == 1 ? "" : "s")} uploaded to tibia-square.com");
     }
 
-    public void NotifySessionPaused(string characterName)
-    {
-        Show("Hunt Paused",
-            $"{characterName} - no kills for 2 min");
-    }
-
     public void NotifyTibiaDetected()
     {
         Show("Tibia Detected",

@@ -96,7 +96,6 @@ public sealed class AppLifecycleManager : IDisposable
                     _debugOverlay.Show();
             });
         };
-
         // Initialize auth early — triggers Discord login if no saved tokens
         _ = InitializeAuthEarlyAsync();
 
@@ -287,13 +286,6 @@ public sealed class AppLifecycleManager : IDisposable
                 RefreshSyncStatus();
             }
         };
-        _sessionManager.SessionPaused += () =>
-        {
-            var name = _sessionManager.CurrentSession?.CharacterName ?? "Unknown";
-            if (_trayIconManager.IsDebugMode)
-                _notifications.NotifySessionPaused(name);
-        };
-
         _sessionManager.RecoverUnfinishedSessions();
 
         // Sync pending sessions if authenticated
