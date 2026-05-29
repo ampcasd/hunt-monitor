@@ -49,6 +49,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
     private long? _lastLoot;
     private long? _lastDamage;
     private long? _lastHealing;
+    private Dictionary<string, int> _lastKilledMonsterCounts = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly TimeSpan ActiveInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan PausedInterval = TimeSpan.FromSeconds(2);
@@ -119,6 +120,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
         _lastLoot = null;
         _lastDamage = null;
         _lastHealing = null;
+        _lastKilledMonsterCounts = new(StringComparer.OrdinalIgnoreCase);
     }
 
     public void Start(IntPtr hwnd)
@@ -334,6 +336,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
             if (snapshot.Loot.HasValue) _lastLoot = snapshot.Loot;
             if (snapshot.Damage.HasValue) _lastDamage = snapshot.Damage;
             if (snapshot.Healing.HasValue) _lastHealing = snapshot.Healing;
+            UpdateKilledMonsterCounts(snapshot);
 
             // Only reset the notification grace period after a genuinely valid read —
             // not on every OCR detection, since validation failures can cascade.
@@ -460,6 +463,14 @@ public sealed class PeriodicCaptureLoop : IDisposable
         // Only fail if every tracked field decreased — single-field drops are OCR noise
         if (trackedCount >= 2 && decreasedCount == trackedCount)
         {
+            if (HasKillCounterDecrease(snapshot))
+            {
+                _logger.Debug($"Validation passed: cumulative fields and kill counters decreased " +
+                    $"(loot={_lastLoot}→{snapshot.Loot}, damage={_lastDamage}→{snapshot.Damage}, " +
+                    $"healing={_lastHealing}→{snapshot.Healing}) — likely analyser counter reset");
+                return true;
+            }
+
             _logger.Debug($"Validation failed: all {trackedCount} tracked fields decreased " +
                 $"(loot={_lastLoot}→{snapshot.Loot}, damage={_lastDamage}→{snapshot.Damage}, " +
                 $"healing={_lastHealing}→{snapshot.Healing}) — likely row-level misassignment");
@@ -490,6 +501,30 @@ public sealed class PeriodicCaptureLoop : IDisposable
         }
 
         return true;
+    }
+
+    private bool HasKillCounterDecrease(HuntSnapshot snapshot)
+    {
+        if (_lastKilledMonsterCounts.Count == 0 || snapshot.KilledMonsters.Count == 0)
+            return false;
+
+        var previousTotal = _lastKilledMonsterCounts.Values.Sum();
+        var currentTotal = snapshot.KilledMonsters.Sum(m => m.Count);
+
+        if (currentTotal >= previousTotal)
+            return false;
+
+        return snapshot.KilledMonsters.Any(m =>
+            _lastKilledMonsterCounts.TryGetValue(m.Name, out var previous) && m.Count < previous);
+    }
+
+    private void UpdateKilledMonsterCounts(HuntSnapshot snapshot)
+    {
+        foreach (var monster in snapshot.KilledMonsters)
+        {
+            var current = _lastKilledMonsterCounts.TryGetValue(monster.Name, out var known) ? known : 0;
+            _lastKilledMonsterCounts[monster.Name] = Math.Max(current, monster.Count);
+        }
     }
 
     public void Dispose()
