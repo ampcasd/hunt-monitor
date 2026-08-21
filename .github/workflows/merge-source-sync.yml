@@ -1,0 +1,74 @@
+name: Merge signed source sync
+
+on:
+  push:
+    branches:
+      - 'codex/sync-desktop-v*'
+
+permissions:
+  actions: write
+  checks: read
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    if: github.repository == 'ampcasd/hunt-monitor'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Open, validate, and merge source-sync PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          PR_URL=$(gh pr list --repo "$REPOSITORY" --head "$BRANCH" --state all --limit 1 --json url --jq '.[0].url')
+          if [[ -z "$PR_URL" ]]; then
+            PR_URL=$(gh pr create \
+              --repo "$REPOSITORY" \
+              --base main \
+              --head "$BRANCH" \
+              --title "Sync desktop source from release" \
+              --body "Automated source mirror update from the private release workflow. The head commit is signed by GitHub.")
+          fi
+          echo "Source-sync PR: $PR_URL"
+
+          # PRs opened by GITHUB_TOKEN do not emit another workflow event.
+          # Dispatch CI explicitly against the signed head commit instead.
+          gh workflow run ci.yml --repo "$REPOSITORY" --ref "$BRANCH"
+
+          for attempt in $(seq 1 120); do
+            STATE=$(gh api "repos/$REPOSITORY/commits/$HEAD_SHA/check-runs" \
+              --jq '[.check_runs[] | select(.name == "desktop")] |
+                if length == 0 then "missing"
+                elif any(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required") then "failure"
+                elif any(.status != "completed") then "pending"
+                elif all(.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped") then "success"
+                else "failure" end')
+
+            case "$STATE" in
+              success)
+                echo "Required desktop check passed."
+                break
+                ;;
+              failure)
+                echo "Required desktop check failed."
+                exit 1
+                ;;
+              *)
+                if [[ "$attempt" == "120" ]]; then
+                  echo "Timed out waiting for the required desktop check."
+                  exit 1
+                fi
+                sleep 10
+                ;;
+            esac
+          done
+
+          gh pr merge "$PR_URL" --repo "$REPOSITORY" --squash --delete-branch
