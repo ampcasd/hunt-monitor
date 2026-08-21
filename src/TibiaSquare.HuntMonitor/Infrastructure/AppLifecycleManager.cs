@@ -33,6 +33,7 @@ public sealed class AppLifecycleManager : IDisposable
     private OcrService? _ocrService;
     private PeriodicCaptureLoop? _captureLoop;
     private PersonalBestScreenshotCapture? _screenshotCapture;
+    private string? _activeCharacterName;
 
     // Auth & Sync & Analytics
     private DiscordOAuthService? _authService;
@@ -53,11 +54,11 @@ public sealed class AppLifecycleManager : IDisposable
     // Track last known game resolution to detect changes between sessions
     private (int W, int H) _lastGameResolution;
 
-    // Track last tooltip to avoid redundant updates
-    private string _lastTooltipText = "";
-
-    // Lazy init guard — heavy services only start when Tibia is first detected
-    private bool _servicesInitialized;
+    // Lazy initialization is shared by TibiaOpened and TibiaDetected. Keeping the
+    // in-flight Task prevents the character event from racing ahead of storage and
+    // session-manager setup on cold startup.
+    private readonly object _servicesInitializationLock = new();
+    private Task? _servicesInitializationTask;
 
     public AppLifecycleManager(TrayIconManager trayIconManager)
     {
@@ -196,10 +197,14 @@ public sealed class AppLifecycleManager : IDisposable
     /// Initializes all heavy services (DB, auth, sync, session manager, OBS).
     /// Called lazily on first Tibia detection so the app stays ultra-light until needed.
     /// </summary>
-    private async Task EnsureServicesInitializedAsync()
+    private Task EnsureServicesInitializedAsync()
     {
-        if (_servicesInitialized) return;
-        _servicesInitialized = true;
+        lock (_servicesInitializationLock)
+            return _servicesInitializationTask ??= InitializeServicesAsync();
+    }
+
+    private async Task InitializeServicesAsync()
+    {
 
         _logger.Info("Initializing services (first Tibia detection)");
 
@@ -424,13 +429,15 @@ public sealed class AppLifecycleManager : IDisposable
     /// Any Tibia window appeared (login screen or logged in).
     /// Initializes services and launches OBS proactively.
     /// </summary>
-    private async void OnTibiaOpened()
+    private async void OnTibiaOpened(TibiaWindowInfo info)
     {
         _logger.Info("Tibia process detected");
         _analytics?.Track("tibia_detected");
         EfficiencyMode.Disable();
 
         await EnsureServicesInitializedAsync();
+
+        _obsManager?.SetTargetProcessId(info.ProcessId);
 
         _trayIconManager.UpdateTooltip("Tibia detected");
         _notifications.NotifyTibiaDetected();
@@ -455,6 +462,7 @@ public sealed class AppLifecycleManager : IDisposable
     private void OnTibiaClosed()
     {
         _logger.Info("Tibia process closed");
+        _activeCharacterName = null;
         _analytics?.Track("tibia_closed");
         EfficiencyMode.Enable();
         _notifications.NotifyTibiaClosed();
@@ -469,6 +477,8 @@ public sealed class AppLifecycleManager : IDisposable
     /// </summary>
     private async void OnTibiaDetected(TibiaWindowInfo info)
     {
+        await EnsureServicesInitializedAsync();
+
         if (_sessionManager == null)
         {
             _logger.Warn("Session tracking not initialized — capture will not start");
@@ -476,6 +486,11 @@ public sealed class AppLifecycleManager : IDisposable
         }
 
         _logger.Info($"Character detected: {info.CharacterName} (HWND: {info.Hwnd})");
+        _obsManager?.SetTargetProcessId(info.ProcessId);
+        _activeCharacterName = info.CharacterName;
+        if (info.CharacterName != null && _syncService != null)
+            _ = _syncService.SyncCharacterOnlineAsync(info.CharacterName);
+
         _analytics?.Track("character_detected", new Dictionary<string, object?>
         {
             ["character_name"] = info.CharacterName,
@@ -496,6 +511,25 @@ public sealed class AppLifecycleManager : IDisposable
             _notifications.ShowError("OBS Error",
                 "Failed to start OBS. Capture cannot begin.");
             return;
+        }
+
+        // OBS may have launched from the login-screen event before GPU telemetry
+        // became available. Re-check now that the character renderer is active.
+        if (_obsManager?.HasConfirmedGpuMismatch() == true)
+        {
+            _logger.Warn("Confirmed Tibia/OBS GPU mismatch after startup — reconciling OBS adapter");
+            _obsCaptureService?.Dispose();
+            _obsCaptureService = null;
+
+            var restarted = await _obsManager.RestartAsync();
+            if (!restarted)
+            {
+                _notifications.ShowError("OBS Error",
+                    "Failed to restart OBS on the same graphics adapter as Tibia.");
+                return;
+            }
+
+            _obsCaptureService = new ObsCaptureService(_obsManager, _logger);
         }
 
         // If the game resolution changed since last session, update OBS config and restart
@@ -617,7 +651,17 @@ public sealed class AppLifecycleManager : IDisposable
     {
         _logger.Info("Character lost");
 
-        _captureLoop?.FlushStaminaSync();
+        if (_captureLoop != null)
+        {
+            _captureLoop.FlushStaminaSync();
+        }
+        else if (_activeCharacterName != null && _syncService != null)
+        {
+            _logger.Info($"Sending logout sync for {_activeCharacterName} without capture loop");
+            _ = _syncService.SyncStaminaAsync(_activeCharacterName, null, isLogout: true);
+        }
+
+        _activeCharacterName = null;
         _captureLoop?.Stop();
         _sessionManager?.OnWindowLost();
         ReleaseCaptureResources();
@@ -644,11 +688,7 @@ public sealed class AppLifecycleManager : IDisposable
             text = "Hunt Analyser visible - Not Hunting";
         }
 
-        if (text != _lastTooltipText)
-        {
-            _lastTooltipText = text;
-            _trayIconManager.UpdateTooltip(text);
-        }
+        _trayIconManager.UpdateTooltip(text);
     }
 
     private static string FormatDuration(TimeSpan ts)

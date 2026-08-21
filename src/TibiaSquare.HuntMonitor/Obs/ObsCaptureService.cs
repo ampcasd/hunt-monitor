@@ -144,6 +144,7 @@ public sealed class ObsCaptureService : ICaptureService
                     ["priority"] = 2, // 2 = match by executable name (most reliable)
                     ["capture_cursor"] = false,
                     ["capture_audio"] = false,
+                    ["anti_cheat_hook"] = true,
                 },
                 ["overlay"] = false, // full replace, not overlay
             });
@@ -307,6 +308,7 @@ public sealed class ObsCaptureService : ICaptureService
                     ["capture_mode"] = "window",
                     ["capture_cursor"] = false,
                     ["capture_audio"] = false,
+                    ["anti_cheat_hook"] = true,
                 },
                 ["sceneItemEnabled"] = true,
             });
@@ -482,6 +484,7 @@ public sealed class ObsCaptureService : ICaptureService
             ["capture_mode"] = "window",
             ["capture_cursor"] = false,
             ["capture_audio"] = false,
+            ["anti_cheat_hook"] = true,
         };
 
         if (_windowTarget != null)
@@ -578,7 +581,10 @@ public sealed class ObsCaptureService : ICaptureService
 
             var response = await SendRequestInternalAsync("GetSourceScreenshot", new JsonObject
             {
-                ["sourceName"] = SceneName,
+                // Capture the raw input rather than the rendered scene. Scene-item
+                // transforms and stale overlay inputs can otherwise cover or scale
+                // the game even while Game Capture itself is healthy.
+                ["sourceName"] = SourceName,
                 ["imageFormat"] = ImageFormat,
                 ["imageWidth"] = _screenshotWidth,
                 ["imageHeight"] = _screenshotHeight,

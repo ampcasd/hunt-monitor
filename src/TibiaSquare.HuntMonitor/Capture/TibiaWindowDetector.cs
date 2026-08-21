@@ -7,6 +7,9 @@ namespace TibiaSquare.HuntMonitor.Capture;
 
 public record TibiaWindowInfo(IntPtr Hwnd, string? CharacterName)
 {
+    /// <summary>Windows process ID for the game client.</summary>
+    public int ProcessId { get; init; }
+
     /// <summary>Window class name (e.g. "OgreD3D11Wnd")</summary>
     public string? WindowClass { get; init; }
 
@@ -126,10 +129,12 @@ public static partial class TibiaWindowDetector
     private static TibiaWindowInfo BuildWindowInfo(IntPtr hwnd, string? characterName)
     {
         var (monW, monH) = GetMonitorResolution(hwnd);
+        var processId = GetProcessId(hwnd);
         return new TibiaWindowInfo(hwnd, characterName)
         {
             WindowClass = GetWindowClassName(hwnd),
-            ExecutableName = GetProcessExeName(hwnd),
+            ExecutableName = GetProcessExeName(processId),
+            ProcessId = processId,
             ClientWidth = monW,
             ClientHeight = monH,
         };
@@ -153,14 +158,19 @@ public static partial class TibiaWindowDetector
         return length > 0 ? sb.ToString() : null;
     }
 
-    private static string? GetProcessExeName(IntPtr hwnd)
+    private static int GetProcessId(IntPtr hwnd)
+    {
+        GetWindowThreadProcessId(hwnd, out uint processId);
+        return checked((int)processId);
+    }
+
+    private static string? GetProcessExeName(int processId)
     {
         try
         {
-            GetWindowThreadProcessId(hwnd, out uint processId);
             if (processId == 0) return null;
 
-            using var process = Process.GetProcessById((int)processId);
+            using var process = Process.GetProcessById(processId);
             return process.ProcessName + ".exe";
         }
         catch

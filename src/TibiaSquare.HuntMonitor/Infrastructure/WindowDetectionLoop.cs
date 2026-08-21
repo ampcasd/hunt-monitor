@@ -14,7 +14,7 @@ public sealed class WindowDetectionLoop : IDisposable
     public TibiaWindowInfo? CurrentWindow => _currentWindow;
 
     /// <summary>Any Tibia window appeared (login screen or logged in).</summary>
-    public event Action? TibiaOpened;
+    public event Action<TibiaWindowInfo>? TibiaOpened;
 
     /// <summary>All Tibia windows gone.</summary>
     public event Action? TibiaClosed;
@@ -56,7 +56,7 @@ public sealed class WindowDetectionLoop : IDisposable
             if (!_tibiaRunning)
             {
                 _tibiaRunning = true;
-                TibiaOpened?.Invoke();
+                TibiaOpened?.Invoke(found);
             }
 
             if (found.CharacterName != null)

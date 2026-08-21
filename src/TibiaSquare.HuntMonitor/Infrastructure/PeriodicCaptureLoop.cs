@@ -24,7 +24,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
     private readonly Action<bool>? _onAnalyserStatusChanged;
     private Action<HuntSnapshot?, IReadOnlyList<string>, IReadOnlyList<OcrWordInfo>, double?, byte[]?, string?>? _onOcrTick;
     private Action<int?, IReadOnlyList<OcrWordInfo>, byte[]?, string?>? _onSkillsTick;
-    private Action<string, int, bool>? _onStaminaSync;
+    private Action<string, int?, bool>? _onStaminaSync;
 
     private CancellationTokenSource? _cts;
     private Task? _loopTask;
@@ -95,7 +95,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
         Action<bool>? onAnalyserStatusChanged = null,
         Action<HuntSnapshot?, IReadOnlyList<string>, IReadOnlyList<OcrWordInfo>, double?, byte[]?, string?>? onOcrTick = null,
         Action<int?, IReadOnlyList<OcrWordInfo>, byte[]?, string?>? onSkillsTick = null,
-        Action<string, int, bool>? onStaminaSync = null)
+        Action<string, int?, bool>? onStaminaSync = null)
     {
         _onOcrTick = onOcrTick;
         _onSkillsTick = onSkillsTick;
@@ -144,13 +144,12 @@ public sealed class PeriodicCaptureLoop : IDisposable
     }
 
     /// <summary>
-    /// Fires a final stamina sync with the last known value. Called on character logout
-    /// so the server always has the most recent stamina when the player goes offline.
+    /// Fires a final logout sync. Includes the last known stamina when OCR found one,
+    /// but still notifies the server when stamina was never parsed.
     /// </summary>
     public void FlushStaminaSync()
     {
-        if (_lastStamina.HasValue)
-            _onStaminaSync?.Invoke(_characterName, _lastStamina.Value, true);
+        _onStaminaSync?.Invoke(_characterName, _lastStamina, true);
     }
 
     private async Task RunAsync(CancellationToken ct)
@@ -310,6 +309,15 @@ public sealed class PeriodicCaptureLoop : IDisposable
                     _logger.Debug($"    OCR: {line}");
             }
 
+            // The locator can occasionally anchor on a lower analyser row such as
+            // Balance. That crop still OCRs cleanly, but it omits the XP rows we need.
+            if (IsCropMissingTrackedRows(lines))
+            {
+                _logger.Debug($"Invalidating analyser crop: OCR starts below tracked rows ({lines.FirstOrDefault() ?? "no lines"})");
+                _regionLocator.InvalidateCache();
+                return;
+            }
+
             if (snapshot == null)
                 return;
 
@@ -426,6 +434,50 @@ public sealed class PeriodicCaptureLoop : IDisposable
     /// RawXpPerHour/XpPerHour when the panel is scrolled and labels aren't recognized).
     /// Returns false if the snapshot looks suspicious and should be rejected.
     /// </summary>
+    private static bool IsCropMissingTrackedRows(IReadOnlyList<string> lines)
+    {
+        var meaningfulLines = lines
+            .Select(NormalizeOcrLine)
+            .Where(line => line.Length > 0 && line != "none")
+            .ToList();
+
+        if (meaningfulLines.Count == 0)
+            return false;
+
+        bool hasExpectedTopRows = meaningfulLines.Any(line =>
+            line.Contains("session", StringComparison.Ordinal)
+            || line.Contains("raw xp", StringComparison.Ordinal)
+            || line.Contains("xp gain", StringComparison.Ordinal)
+            || IsStatLabel(line, "loot")
+            || IsStatLabel(line, "supplies"));
+
+        if (hasExpectedTopRows)
+            return false;
+
+        var first = meaningfulLines[0];
+        return first.StartsWith("balance", StringComparison.Ordinal)
+            || first.StartsWith("damage", StringComparison.Ordinal)
+            || first.StartsWith("healing", StringComparison.Ordinal)
+            || first.StartsWith("killed monsters", StringComparison.Ordinal)
+            || first.StartsWith("looted items", StringComparison.Ordinal);
+    }
+
+    private static string NormalizeOcrLine(string line)
+    {
+        return line
+            .Trim()
+            .TrimStart('\\', '/', '|', '-', '_', ':')
+            .Trim()
+            .ToLowerInvariant();
+    }
+
+    private static bool IsStatLabel(string line, string label)
+    {
+        return line == label
+            || line.StartsWith(label + ":", StringComparison.Ordinal)
+            || line.StartsWith(label + " ", StringComparison.Ordinal);
+    }
+
     private bool ValidateSnapshot(HuntSnapshot snapshot)
     {
         // 0. Analyser reset — all cumulative fields dropped to zero/null simultaneously.
