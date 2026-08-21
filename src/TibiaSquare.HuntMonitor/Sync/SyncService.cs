@@ -135,43 +135,48 @@ public sealed class SyncService
 
         try
         {
-            using var form = new MultipartFormDataContent();
-
-            for (int i = 0; i < screenshots.Count; i++)
+            // Vercel rejects the combined five-image request before it reaches the
+            // route (~6-7 MB in a typical hunt). Upload one image per request so
+            // every request stays below both the platform and route limits.
+            foreach (var screenshot in screenshots)
             {
-                var screenshot = screenshots[i];
                 if (!File.Exists(screenshot.FilePath))
                 {
                     _logger.Warn($"Screenshot file missing: {screenshot.FilePath}");
                     continue;
                 }
 
+                using var form = new MultipartFormDataContent();
                 var fileBytes = await File.ReadAllBytesAsync(screenshot.FilePath);
                 var fileContent = new ByteArrayContent(fileBytes);
                 fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
-                form.Add(fileContent, $"screenshots[{i}].file", Path.GetFileName(screenshot.FilePath));
-                form.Add(new StringContent(screenshot.SessionTimeSeconds.ToString()), $"screenshots[{i}].sessionTimeSeconds");
-                form.Add(new StringContent(screenshot.RawXpPerHour?.ToString() ?? ""), $"screenshots[{i}].rawXpPerHour");
+                form.Add(fileContent, "screenshots[0].file", Path.GetFileName(screenshot.FilePath));
+                form.Add(new StringContent(screenshot.SessionTimeSeconds.ToString()), "screenshots[0].sessionTimeSeconds");
+                form.Add(new StringContent(screenshot.RawXpPerHour?.ToString() ?? ""), "screenshots[0].rawXpPerHour");
+
+                _http.DefaultRequestHeaders.Clear();
+                _http.DefaultRequestHeaders.Add("Authorization", $"Bearer {_auth.CurrentTokens!.AccessToken}");
+
+                using var response = await _http.PostAsync(
+                    $"{_apiBaseUrl}/api/desktop/sessions/{sessionId}/screenshots",
+                    form);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    _store.MarkScreenshotsUploaded(new[] { screenshot.Id });
+                    _logger.Debug(
+                        $"Screenshot uploaded for session {sessionId} at {screenshot.SessionTimeSeconds}s");
+                }
+                else
+                {
+                    var body = await response.Content.ReadAsStringAsync();
+                    _logger.Error(
+                        $"Screenshot upload failed at {screenshot.SessionTimeSeconds}s: " +
+                        $"{response.StatusCode} - {body}");
+                }
             }
 
-            if (form.Count() == 0)
-                return;
-
-            _http.DefaultRequestHeaders.Clear();
-            _http.DefaultRequestHeaders.Add("Authorization", $"Bearer {_auth.CurrentTokens!.AccessToken}");
-
-            var response = await _http.PostAsync($"{_apiBaseUrl}/api/desktop/sessions/{sessionId}/screenshots", form);
-
-            if (response.IsSuccessStatusCode)
-            {
-                _store.MarkScreenshotsUploaded(screenshots.Select(s => s.Id).ToList());
-                _logger.Info($"Screenshots uploaded for session {sessionId}");
-            }
-            else
-            {
-                var body = await response.Content.ReadAsStringAsync();
-                _logger.Error($"Screenshot upload failed: {response.StatusCode} - {body}");
-            }
+            _logger.Info($"Screenshot upload pass completed for session {sessionId}");
         }
         catch (Exception ex)
         {
@@ -242,10 +247,9 @@ public sealed class SyncService
     }
 
     /// <summary>
-    /// Updates the character's stamina on the server. Called periodically (every ~60s)
-    /// during active hunting and on character logout.
+    /// Marks the character online on the server even before stamina OCR has a value.
     /// </summary>
-    public async Task SyncStaminaAsync(string characterName, int staminaMinutes, bool isLogout = false)
+    public async Task SyncCharacterOnlineAsync(string characterName)
     {
         if (!await _auth.EnsureValidTokenAsync())
             return;
@@ -255,25 +259,67 @@ public sealed class SyncService
             var json = JsonSerializer.Serialize(new
             {
                 characterName,
-                staminaMinutes,
-                logout = isLogout,
+                online = true,
             });
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            await PostStaminaPayloadAsync(json, "Online presence sync");
+        }
+        catch (Exception ex)
+        {
+            _logger.Debug($"Online presence sync error: {ex.Message}");
+        }
+    }
 
-            _http.DefaultRequestHeaders.Clear();
-            _http.DefaultRequestHeaders.Add("Authorization", $"Bearer {_auth.CurrentTokens!.AccessToken}");
+    /// <summary>
+    /// Updates the character's stamina on the server. Called periodically (every ~60s)
+    /// during active hunting and on character logout. Logout events are sent even
+    /// when stamina OCR never produced a value.
+    /// </summary>
+    public async Task SyncStaminaAsync(string characterName, int? staminaMinutes, bool isLogout = false)
+    {
+        if (!isLogout && !staminaMinutes.HasValue)
+        {
+            _logger.Warn($"Skipping stamina sync for {characterName}: no stamina value");
+            return;
+        }
 
-            var response = await _http.PostAsync($"{_apiBaseUrl}/api/desktop/stamina", content);
+        if (!await _auth.EnsureValidTokenAsync())
+            return;
 
-            if (!response.IsSuccessStatusCode)
-            {
-                var body = await response.Content.ReadAsStringAsync();
-                _logger.Error($"Stamina sync failed: {response.StatusCode} - {body}");
-            }
+        try
+        {
+            var json = staminaMinutes.HasValue
+                ? JsonSerializer.Serialize(new
+                {
+                    characterName,
+                    staminaMinutes = staminaMinutes.Value,
+                    logout = isLogout,
+                })
+                : JsonSerializer.Serialize(new
+                {
+                    characterName,
+                    logout = isLogout,
+                });
+            await PostStaminaPayloadAsync(json, "Stamina sync");
         }
         catch (Exception ex)
         {
             _logger.Debug($"Stamina sync error: {ex.Message}");
+        }
+    }
+
+    private async Task PostStaminaPayloadAsync(string json, string operationName)
+    {
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+        _http.DefaultRequestHeaders.Clear();
+        _http.DefaultRequestHeaders.Add("Authorization", $"Bearer {_auth.CurrentTokens!.AccessToken}");
+
+        var response = await _http.PostAsync($"{_apiBaseUrl}/api/desktop/stamina", content);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync();
+            _logger.Error($"{operationName} failed: {response.StatusCode} - {body}");
         }
     }
 

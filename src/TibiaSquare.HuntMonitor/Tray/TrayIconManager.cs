@@ -103,6 +103,13 @@ public sealed class TrayIconManager : IDisposable
 
     public void UpdateTooltip(string text)
     {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher != null && !dispatcher.CheckAccess())
+        {
+            dispatcher.BeginInvoke(() => UpdateTooltip(text));
+            return;
+        }
+
         if (_taskbarIcon != null)
             _taskbarIcon.ToolTipText = text;
     }
