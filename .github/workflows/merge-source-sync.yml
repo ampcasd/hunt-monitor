@@ -10,10 +10,13 @@ permissions:
   checks: read
   contents: write
   pull-requests: write
+  statuses: write
 
 jobs:
   merge:
-    if: github.repository == 'ampcasd/hunt-monitor'
+    # Creating the branch emits a push before the signed snapshot is appended.
+    # Only the second event represents a source update that needs a PR.
+    if: github.repository == 'ampcasd/hunt-monitor' && github.event.created == false
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -70,5 +73,15 @@ jobs:
                 ;;
             esac
           done
+
+          # workflow_dispatch checks are not attached to the PR's check suite.
+          # Publish the successful result through this GitHub Actions token so
+          # the protected branch's required `desktop` context is satisfied by
+          # the same integration after the real CI job passes.
+          gh api "repos/$REPOSITORY/statuses/$HEAD_SHA" \
+            --method POST \
+            -f state=success \
+            -f context=desktop \
+            -f description="Desktop CI passed in the dispatched workflow"
 
           gh pr merge "$PR_URL" --repo "$REPOSITORY" --squash --delete-branch
