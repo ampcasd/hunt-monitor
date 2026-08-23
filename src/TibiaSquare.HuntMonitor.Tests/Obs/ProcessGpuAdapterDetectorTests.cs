@@ -27,17 +27,32 @@ public sealed class ProcessGpuAdapterDetectorTests
     }
 
     [Theory]
-    [InlineData(null, null, 1, 2)]
-    [InlineData(1, 1, null, 2)]
-    [InlineData(2, 2, null, 1)]
-    public void BuildProbeOrder_TriesCurrentThenEveryWindowsPreference(
+    [InlineData(null, 0, 1, 2, 3)]
+    [InlineData(0, 0, 1, 2, 3)]
+    [InlineData(1, 1, 0, 2, 3)]
+    [InlineData(3, 3, 0, 1, 2)]
+    [InlineData(9, 0, 1, 2, 3)]
+    public void BuildProbeOrder_TriesConfiguredAdapterThenEveryAvailableIndex(
         int? current,
-        int? first,
-        int? second,
-        int? third)
+        int first,
+        int second,
+        int third,
+        int fourth)
     {
-        var order = ObsGpuPreferenceStore.BuildProbeOrder(current);
+        var currentAdapterIndex = current.HasValue ? (uint?)current.Value : null;
 
-        Assert.Equal(new int?[] { first, second, third }, order);
+        var order = ObsAdapterProbe.BuildProbeOrder(currentAdapterIndex, maxAdapterCount: 4);
+
+        Assert.Equal(
+            new uint[] { (uint)first, (uint)second, (uint)third, (uint)fourth },
+            order);
+    }
+
+    [Fact]
+    public void BuildProbeOrder_ReturnsEmptyWhenNoAdaptersCanBeProbed()
+    {
+        var order = ObsAdapterProbe.BuildProbeOrder(currentAdapterIndex: 0, maxAdapterCount: 0);
+
+        Assert.Empty(order);
     }
 }

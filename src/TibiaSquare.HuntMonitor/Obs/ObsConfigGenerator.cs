@@ -18,14 +18,18 @@ public static class ObsConfigGenerator
     public const string SceneName = "Hunt Monitor";
     public const string GameCaptureSourceName = "Tibia Game Capture";
 
-    public static void EnsureConfig(string obsPortableDir, int websocketPort, string websocketPassword)
+    public static void EnsureConfig(
+        string obsPortableDir,
+        int websocketPort,
+        string websocketPassword,
+        uint? adapterIndex = null)
     {
         var configRoot = Path.Combine(obsPortableDir, "config", "obs-studio");
         Directory.CreateDirectory(configRoot);
 
         // These are always force-written to ensure correct startup behavior
         WriteGlobalConfig(configRoot);
-        WriteUserConfig(configRoot);
+        WriteUserConfig(configRoot, adapterIndex ?? ReadAdapterIndex(obsPortableDir));
         WriteWebSocketConfig(configRoot, websocketPort, websocketPassword);
 
         // Profile is only written on first run — preserves canvas size set by UpdateCanvasSize
@@ -73,12 +77,37 @@ public static class ObsConfigGenerator
     }
 
     /// <summary>
+    /// Reads OBS's explicit D3D11 adapter index from user.ini.
+    /// Returns null when OBS should use its default adapter ordering.
+    /// </summary>
+    public static uint? ReadAdapterIndex(string obsPortableDir)
+    {
+        var path = Path.Combine(obsPortableDir, "config", "obs-studio", "user.ini");
+        if (!File.Exists(path))
+            return null;
+
+        foreach (var line in File.ReadLines(path))
+        {
+            if (line.StartsWith("AdapterIdx=", StringComparison.OrdinalIgnoreCase) &&
+                uint.TryParse(line.AsSpan("AdapterIdx=".Length), out var adapterIndex))
+            {
+                return adapterIndex;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Always overwritten — controls UI behavior, tray minimize, and first-run wizard.
     /// Without this file, OBS shows the auto-configuration wizard and ignores --minimize-to-tray.
     /// </summary>
-    private static void WriteUserConfig(string configRoot)
+    private static void WriteUserConfig(string configRoot, uint? adapterIndex)
     {
         var path = Path.Combine(configRoot, "user.ini");
+        var adapterSetting = adapterIndex.HasValue
+            ? $"AdapterIdx={adapterIndex.Value}"
+            : string.Empty;
 
         var content = $"""
             [General]
@@ -103,6 +132,9 @@ public static class ObsConfigGenerator
             ProfileDir={ProfileName}
             SceneCollection={SceneCollectionName}
             SceneCollectionFile={SceneCollectionName}.json
+
+            [Video]
+            {adapterSetting}
             """;
 
         File.WriteAllText(path, content);
