@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.RegularExpressions;
-using Microsoft.Win32;
 
 namespace TibiaSquare.HuntMonitor.Obs;
 
@@ -71,81 +70,26 @@ public readonly record struct GpuAdapterId(uint HighPart, uint LowPart)
 }
 
 /// <summary>
-/// Manages Windows' per-application GPU preference for the bundled OBS binary.
-/// Preference 1 is minimum-power and 2 is high-performance. Since those labels
-/// do not identify an exact adapter, callers verify the launched OBS adapter and
-/// probe the other preference automatically when necessary.
+/// Builds the explicit OBS D3D11 adapter indices to try. OBS reads AdapterIdx
+/// from user.ini and passes it directly to its graphics device creation.
 /// </summary>
-public static class ObsGpuPreferenceStore
+public static class ObsAdapterProbe
 {
-    private const string RegistryPath = @"Software\Microsoft\DirectX\UserGpuPreferences";
-    private static readonly Regex PreferencePattern = new(
-        @"GpuPreference=(?<preference>[12]);?",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
-    public static int? GetPreference(string executablePath)
+    public static IReadOnlyList<uint> BuildProbeOrder(uint? currentAdapterIndex, uint maxAdapterCount)
     {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(RegistryPath);
-            var value = key?.GetValue(executablePath) as string;
-            var match = value == null ? Match.Empty : PreferencePattern.Match(value);
-            return match.Success && int.TryParse(match.Groups["preference"].Value, out var preference)
-                ? preference
-                : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
+        if (maxAdapterCount == 0)
+            return Array.Empty<uint>();
 
-    public static bool TrySetPreference(string executablePath, int? preference)
-    {
-        try
+        var result = new List<uint>((int)maxAdapterCount);
+        if (currentAdapterIndex.HasValue && currentAdapterIndex.Value < maxAdapterCount)
+            result.Add(currentAdapterIndex.Value);
+
+        for (uint index = 0; index < maxAdapterCount; index++)
         {
-            using var key = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
-            var existing = key.GetValue(executablePath) as string ?? string.Empty;
-            var withoutPreference = PreferencePattern.Replace(existing, string.Empty).Trim();
-
-            if (preference is 1 or 2)
-            {
-                var prefix = withoutPreference.Length > 0 && !withoutPreference.EndsWith(';')
-                    ? withoutPreference + ";"
-                    : withoutPreference;
-                var updated = $"{prefix}GpuPreference={preference};";
-                key.SetValue(executablePath, updated, RegistryValueKind.String);
-            }
-            else if (withoutPreference.Length == 0)
-            {
-                key.DeleteValue(executablePath, throwOnMissingValue: false);
-            }
-            else
-            {
-                key.SetValue(executablePath, withoutPreference, RegistryValueKind.String);
-            }
-
-            return true;
+            if (!result.Contains(index))
+                result.Add(index);
         }
-        catch
-        {
-            return false;
-        }
-    }
 
-    public static IReadOnlyList<int?> BuildProbeOrder(int? currentPreference)
-    {
-        var result = new List<int?>();
-        AddUnique(currentPreference);
-        AddUnique(null);
-        AddUnique(1);
-        AddUnique(2);
         return result;
-
-        void AddUnique(int? value)
-        {
-            if (!result.Any(existing => existing == value))
-                result.Add(value);
-        }
     }
 }

@@ -218,6 +218,9 @@ public sealed class SyncService
             EndedAt = session.EndedAtUtc?.ToString("o"),
             ActiveDurationSeconds = session.ActiveDurationSeconds,
             EndReason = session.EndReason,
+            // V3: rolling rates drive averages/charts, while peaks remain the
+            // highest accepted frame-level Hunt Analyser readings.
+            RateCalculationVersion = 3,
             PeakXpPerHour = processed.PeakXpPerHour,
             AverageTopXpPerHour = processed.AverageTopXpPerHour,
             PeakRawXpPerHour = processed.PeakRawXpPerHour,

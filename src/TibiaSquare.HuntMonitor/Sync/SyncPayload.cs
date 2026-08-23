@@ -22,6 +22,9 @@ public sealed class SyncPayload
     [JsonPropertyName("endReason")]
     public string? EndReason { get; init; }
 
+    [JsonPropertyName("rateCalculationVersion")]
+    public int RateCalculationVersion { get; init; }
+
     [JsonPropertyName("peakXpPerHour")]
     public long? PeakXpPerHour { get; init; }
 

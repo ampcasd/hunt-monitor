@@ -26,6 +26,7 @@ public sealed class ObsProcessManager : IDisposable
     private bool _disposed;
 
     private const int MaxRestarts = 3;
+    private const uint MaxAdapterProbeCount = 4;
     private const int StatusDllNotFound = -1073741515; // 0xC0000135
     private const string VersionStampFileName = ".tibia-square-version";
     private static readonly TimeSpan RestartDelay = TimeSpan.FromSeconds(3);
@@ -220,13 +221,7 @@ public sealed class ObsProcessManager : IDisposable
         // Kill any orphaned OBS instances from previous runs
         KillOrphanedObsProcesses(exePath);
 
-        // Generate config files
         var isPortable = IsPortableInstall(obsDir);
-        if (isPortable)
-        {
-            ObsConfigGenerator.EnsureConfig(obsDir, WebSocketPort, WebSocketPassword);
-            _logger.Info("OBS config generated/verified");
-        }
 
         // Build launch arguments
         var args = new List<string>();
@@ -246,30 +241,29 @@ public sealed class ObsProcessManager : IDisposable
         {
             var workingDir = Path.GetDirectoryName(exePath)!;
             var targetAdapter = TryGetTargetAdapter();
-            var currentPreference = ObsGpuPreferenceStore.GetPreference(exePath);
-            var probeOrder = targetAdapter.HasValue
-                ? ObsGpuPreferenceStore.BuildProbeOrder(currentPreference)
-                : new int?[] { currentPreference };
+            var configuredAdapterIndex = isPortable
+                ? ObsConfigGenerator.ReadAdapterIndex(obsDir)
+                : null;
+            var probeOrder = targetAdapter.HasValue && isPortable
+                ? ObsAdapterProbe.BuildProbeOrder(configuredAdapterIndex, MaxAdapterProbeCount)
+                : new uint[] { configuredAdapterIndex ?? 0 };
 
             for (var attempt = 0; attempt < probeOrder.Count; attempt++)
             {
-                var preference = probeOrder[attempt];
-                var canProbe = true;
+                var adapterIndex = probeOrder[attempt];
 
-                if (targetAdapter.HasValue)
+                if (isPortable)
                 {
-                    canProbe = ObsGpuPreferenceStore.TrySetPreference(exePath, preference);
-                    if (canProbe)
-                    {
-                        _logger.Info(
-                            $"OBS GPU reconciliation: target={targetAdapter.Value}, " +
-                            $"trying {FormatGpuPreference(preference)}");
-                    }
-                    else
-                    {
-                        _logger.Warn("OBS GPU reconciliation: Windows GPU preference could not be updated");
-                    }
+                    ObsConfigGenerator.EnsureConfig(
+                        obsDir,
+                        WebSocketPort,
+                        WebSocketPassword,
+                        adapterIndex);
+                    _logger.Info($"OBS config generated/verified (AdapterIdx={adapterIndex})");
                 }
+
+                if (targetAdapter.HasValue && isPortable)
+                    _logger.Info($"OBS adapter reconciliation: target={targetAdapter.Value}, trying AdapterIdx={adapterIndex}");
 
                 StartObsProcess(exePath, argsString, workingDir);
                 _logger.Info($"OBS process started (PID: {_obsProcess!.Id})");
@@ -280,39 +274,47 @@ public sealed class ObsProcessManager : IDisposable
                 if (_obsProcess.HasExited)
                 {
                     var exitCode = _obsProcess.ExitCode;
-                    _logger.Error($"OBS exited immediately with code {exitCode}");
-                    ObsFailed?.Invoke(FormatExitError(exitCode));
+                    var message = attempt > 0 && targetAdapter.HasValue
+                        ? $"OBS could not initialize AdapterIdx={adapterIndex} (exit code {exitCode}); no matching GPU adapter was found"
+                        : FormatExitError(exitCode);
+                    _logger.Error(message);
+                    ObsFailed?.Invoke(message);
                     return false;
                 }
 
-                if (!targetAdapter.HasValue || !canProbe)
+                if (!targetAdapter.HasValue || !isPortable)
                     break;
 
                 var obsAdapter = await WaitForAdapterAsync(_obsProcess.Id);
                 if (!obsAdapter.HasValue)
                 {
-                    _logger.Warn("OBS GPU reconciliation: OBS adapter telemetry unavailable; keeping current preference");
+                    _logger.Warn($"OBS adapter telemetry unavailable; keeping AdapterIdx={adapterIndex}");
                     break;
                 }
 
                 if (obsAdapter.Value == targetAdapter.Value)
                 {
-                    _logger.Info($"OBS GPU reconciliation successful: both processes use {obsAdapter.Value}");
+                    _logger.Info(
+                        $"OBS adapter reconciliation successful: AdapterIdx={adapterIndex}, " +
+                        $"both processes use {obsAdapter.Value}");
                     break;
                 }
 
                 var isLastAttempt = attempt == probeOrder.Count - 1;
                 if (isLastAttempt)
                 {
-                    _logger.Error(
-                        $"OBS GPU reconciliation failed: Tibia={targetAdapter.Value}, OBS={obsAdapter.Value}; " +
-                        "Windows could not route OBS to the same adapter");
-                    break;
+                    var message =
+                        $"OBS adapter reconciliation failed: Tibia={targetAdapter.Value}, OBS={obsAdapter.Value}; " +
+                        $"no matching OBS adapter was found in indices 0-{MaxAdapterProbeCount - 1}";
+                    _logger.Error(message);
+                    StopProbeProcess();
+                    ObsFailed?.Invoke(message);
+                    return false;
                 }
 
                 _logger.Warn(
                     $"OBS GPU mismatch detected: Tibia={targetAdapter.Value}, OBS={obsAdapter.Value}; " +
-                    "restarting OBS with the next Windows GPU preference");
+                    "restarting OBS with the next AdapterIdx");
                 StopProbeProcess();
             }
 
@@ -410,13 +412,6 @@ public sealed class ObsProcessManager : IDisposable
             _obsProcess = null;
         }
     }
-
-    private static string FormatGpuPreference(int? preference) => preference switch
-    {
-        1 => "minimum-power preference",
-        2 => "high-performance preference",
-        _ => "Windows default preference",
-    };
 
     /// <summary>
     /// Restarts OBS (stop + relaunch). Used when the OBS profile needs different canvas dimensions.
