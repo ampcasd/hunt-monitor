@@ -1,11 +1,13 @@
 using Microsoft.Toolkit.Uwp.Notifications;
 using TibiaSquare.HuntMonitor.Models;
+using TibiaSquare.HuntMonitor.Sync;
 
 namespace TibiaSquare.HuntMonitor.Notifications;
 
 public sealed class ToastNotificationService : IDisposable
 {
     private DateTime _lastAnalyserNotFound = DateTime.MinValue;
+    private DateTime _lastXpAnalyserNotFound = DateTime.MinValue;
     private static readonly TimeSpan AnalyserNotFoundCooldown = TimeSpan.FromMinutes(5);
 
     public void NotifySessionStarted(HuntSession session)
@@ -14,7 +16,21 @@ public sealed class ToastNotificationService : IDisposable
             $"New hunt session for {session.CharacterName}");
     }
 
-    public void NotifySessionEnded(HuntSession session, SessionEndReason reason, HuntSnapshot? lastSnapshot)
+    public void NotifySessionEnded(
+        HuntSession session,
+        SessionEndReason reason,
+        HuntSnapshot? lastSnapshot,
+        SyncResult syncResult)
+    {
+        var content = BuildSessionEndedContent(session, reason, lastSnapshot, syncResult);
+        Show(content.Title, content.Messages);
+    }
+
+    internal static (string Title, string[] Messages) BuildSessionEndedContent(
+        HuntSession session,
+        SessionEndReason reason,
+        HuntSnapshot? lastSnapshot,
+        SyncResult syncResult)
     {
         var duration = lastSnapshot != null
             ? FormatDuration(lastSnapshot.SessionTime)
@@ -26,26 +42,27 @@ public sealed class ToastNotificationService : IDisposable
         var balance = lastSnapshot?.Balance;
         var balanceText = balance.HasValue ? $" \u2022 {FormatNumber(balance.Value)} balance" : "";
 
+        var syncText = syncResult switch
+        {
+            SyncResult.Success => "Successfully synced to tibiasquare.com",
+            SyncResult.Failed => "Sync to tibiasquare.com failed — saved locally and will retry next launch",
+            _ => "Saved locally — sign in to sync with tibiasquare.com",
+        };
+
         if (reason == SessionEndReason.MobSetChanged)
         {
-            Show("New Mobs Detected",
-                $"Starting next session for {session.CharacterName} ({duration}{xpText})");
+            return ("New Mobs Detected",
+            [
+                $"Starting next session for {session.CharacterName} ({duration}{xpText})",
+                syncText,
+            ]);
         }
-        else
-        {
-            Show("Hunt Session Saved",
-                $"{session.CharacterName} \u2014 {duration}{xpText}{balanceText}");
-        }
-    }
 
-    public void NotifySyncSucceeded()
-    {
-        Show("Synced", "Session uploaded to tibia-square.com \u2713");
-    }
-
-    public void NotifySyncFailed()
-    {
-        Show("Sync failed", "Session saved locally \u2014 will retry on next launch");
+        return ("Hunt Session Saved",
+        [
+                $"{session.CharacterName} \u2014 {duration}{xpText}{balanceText}",
+                syncText,
+        ]);
     }
 
     public void NotifyPendingSyncRecovered(int syncedCount)
@@ -77,10 +94,42 @@ public sealed class ToastNotificationService : IDisposable
             "Is it open and not covered by a tibia popup?");
     }
 
-    public void NotifyRawExpNotTracked()
+    public void NotifyXpAnalyserNotFound()
     {
-        Show("Raw Exp not tracked",
-            "You might want to turn it on in Hunt Analyser settings in Tibia");
+        var now = DateTime.UtcNow;
+        if (now - _lastXpAnalyserNotFound < AnalyserNotFoundCooldown)
+            return;
+
+        _lastXpAnalyserNotFound = now;
+        Show("XP Analyser not visible",
+            "Open it in Tibia and keep it uncovered to use rolling XP rates");
+    }
+
+    public void NotifyRawExpNotTracked(bool huntAnalyserMissing, bool xpAnalyserMissing)
+    {
+        var content = BuildRawXpNotTrackedContent(huntAnalyserMissing, xpAnalyserMissing);
+        if (content == null)
+            return;
+
+        Show(content.Value.Title, content.Value.Message);
+    }
+
+    internal static (string Title, string Message)? BuildRawXpNotTrackedContent(
+        bool huntAnalyserMissing,
+        bool xpAnalyserMissing)
+    {
+        if (!huntAnalyserMissing && !xpAnalyserMissing)
+            return null;
+
+        var settings = (huntAnalyserMissing, xpAnalyserMissing) switch
+        {
+            (true, true) => "both Hunt Analyser and XP Analyser settings",
+            (true, false) => "Hunt Analyser settings",
+            _ => "XP Analyser settings",
+        };
+
+        return ("Raw XP not tracked",
+            $"Enable raw XP in {settings} in Tibia");
     }
 
     public void ShowError(string title, string message)
@@ -88,14 +137,14 @@ public sealed class ToastNotificationService : IDisposable
         Show(title, message);
     }
 
-    private static void Show(string title, string message)
+    private static void Show(string title, params string[] messages)
     {
         try
         {
-            new ToastContentBuilder()
-                .AddText(title)
-                .AddText(message)
-                .Show();
+            var toast = new ToastContentBuilder().AddText(title);
+            foreach (var message in messages)
+                toast.AddText(message);
+            toast.Show();
         }
         catch
         {
