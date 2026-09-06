@@ -50,4 +50,8 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="TibiaSquare.HuntMonitor.Tests" />
+  </ItemGroup>
+
 </Project>

@@ -46,6 +46,7 @@ public sealed class AppLifecycleManager : IDisposable
 
     // Debug overlay
     private IHuntAnalyserParser? _parser;
+    private IImagePreprocessor? _sharedPreprocessor;
     private DebugOverlayWindow? _debugOverlay;
 
     // Suppress "New Hunt Session" toast after a mob-change split (we already showed "New Mobs Detected")
@@ -91,6 +92,8 @@ public sealed class AppLifecycleManager : IDisposable
             {
                 if (_parser == null) return;
                 _debugOverlay ??= new DebugOverlayWindow(_parser);
+                if (_sharedPreprocessor != null)
+                    _debugOverlay.AttachPreprocessor(_sharedPreprocessor);
                 if (_debugOverlay.IsVisible)
                     _debugOverlay.Hide();
                 else
@@ -254,7 +257,6 @@ public sealed class AppLifecycleManager : IDisposable
                 ["duration_seconds"] = s.ActiveDurationSeconds,
             });
             _trayIconManager.SetHuntActive(false);
-            _notifications.NotifySessionEnded(s, reason, lastSnapshot);
             if (reason == SessionEndReason.MobSetChanged)
                 _suppressNextStartNotification = true;
 
@@ -265,29 +267,12 @@ public sealed class AppLifecycleManager : IDisposable
             if (_syncService != null)
             {
                 _trayIconManager.UpdateSyncInProgress(true);
-                _ = _syncService.SyncSessionAsync(s)
-                    .ContinueWith(async task =>
-                    {
-                        try
-                        {
-                            await _syncService.UploadScreenshotsAsync(s.Id);
-
-                            var result = task.Result;
-                            if (result == SyncResult.Failed)
-                                _notifications.NotifySyncFailed();
-                            else if (result == SyncResult.Success)
-                                _notifications.NotifySyncSucceeded();
-                            // NotAuthenticated: no toast — tray already shows status
-                        }
-                        finally
-                        {
-                            RefreshSyncStatus();
-                            _trayIconManager.UpdateSyncInProgress(false);
-                        }
-                    });
+                _ = FinishSessionSyncAsync(s, reason, lastSnapshot);
             }
             else
             {
+                _notifications.NotifySessionEnded(
+                    s, reason, lastSnapshot, SyncResult.NotAuthenticated);
                 RefreshSyncStatus();
             }
         };
@@ -325,6 +310,29 @@ public sealed class AppLifecycleManager : IDisposable
         {
             _notifications.ShowError("OBS Required",
                 "OBS Portable not found. Place the obs-portable folder next to the application.");
+        }
+    }
+
+    private async Task FinishSessionSyncAsync(
+        HuntSession session,
+        SessionEndReason reason,
+        HuntSnapshot? lastSnapshot)
+    {
+        var result = SyncResult.Failed;
+        try
+        {
+            result = await _syncService!.SyncSessionAsync(session);
+            await _syncService.UploadScreenshotsAsync(session.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error($"Failed to finish session sync for {session.Id}: {ex.Message}");
+        }
+        finally
+        {
+            _notifications.NotifySessionEnded(session, reason, lastSnapshot, result);
+            RefreshSyncStatus();
+            _trayIconManager.UpdateSyncInProgress(false);
         }
     }
 
@@ -441,16 +449,6 @@ public sealed class AppLifecycleManager : IDisposable
 
         _trayIconManager.UpdateTooltip("Tibia detected");
         _notifications.NotifyTibiaDetected();
-
-#if DEBUG
-        // Show debug overlay when Tibia is detected
-        System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
-        {
-            if (_parser == null) return;
-            _debugOverlay ??= new DebugOverlayWindow(_parser);
-            _debugOverlay.Show();
-        });
-#endif
 
         // Start OBS launch in background so it's ready for capture
         _ = EnsureObsRunningAsync();
@@ -578,17 +576,22 @@ public sealed class AppLifecycleManager : IDisposable
             _ocrService = new OcrService();
 
             // Create processing components from the optional Processing DLL
-            var preprocessor = ProcessingAssemblyLoader.CreateImagePreprocessor();
+            var sharedPreprocessor = ProcessingAssemblyLoader.CreateImagePreprocessor();
+            _sharedPreprocessor = sharedPreprocessor;
             _parser = ProcessingAssemblyLoader.CreateHuntAnalyserParser();
             var parser = _parser;
-            var analyserLocator = preprocessor != null
-                ? ProcessingAssemblyLoader.CreateAnalyserRegionLocator(_logger, preprocessor)
+            var analyserLocator = sharedPreprocessor != null
+                ? ProcessingAssemblyLoader.CreateAnalyserRegionLocator(_logger, sharedPreprocessor)
                 : null;
-            var skillsLocator = preprocessor != null
-                ? ProcessingAssemblyLoader.CreateSkillsPanelLocator(_logger, preprocessor)
+            var skillsLocator = sharedPreprocessor != null
+                ? ProcessingAssemblyLoader.CreateSkillsPanelLocator(_logger, sharedPreprocessor)
+                : null;
+            var xpAnalyserLocator = sharedPreprocessor != null
+                ? ProcessingAssemblyLoader.CreateXpAnalyserPanelLocator(_logger, sharedPreprocessor)
                 : null;
 
-            if (parser == null || analyserLocator == null || skillsLocator == null)
+            if (parser == null || sharedPreprocessor == null || analyserLocator == null ||
+                skillsLocator == null || xpAnalyserLocator == null)
             {
                 _logger.Warn("Processing DLL not found — capture will not start. Place TibiaSquare.HuntMonitor.Processing.dll in lib/.");
                 _notifications.ShowError("Processing Missing",
@@ -597,6 +600,24 @@ public sealed class AppLifecycleManager : IDisposable
                 return;
             }
 
+            // The window can outlive a capture loop, so reconnect it whenever the
+            // shared Hunt/Skills/XP Analyser preprocessor is recreated.
+            System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
+            {
+#if DEBUG
+                // The parser does not exist yet in OnTibiaOpened on a cold start,
+                // so create the debug window only after processing is ready.
+                _debugOverlay ??= new DebugOverlayWindow(parser);
+#endif
+                if (_debugOverlay == null)
+                    return;
+
+                _debugOverlay.AttachPreprocessor(sharedPreprocessor);
+#if DEBUG
+                _debugOverlay.Show();
+#endif
+            });
+
             var characterName = info.CharacterName!;
             var huntDates = _store?.GetHuntDates().Take(2).ToHashSet();
             _captureLoop = new PeriodicCaptureLoop(
@@ -604,6 +625,7 @@ public sealed class AppLifecycleManager : IDisposable
                 _ocrService,
                 analyserLocator,
                 skillsLocator,
+                xpAnalyserLocator,
                 parser,
                 _sessionManager!,
                 _notifications,
@@ -624,6 +646,10 @@ public sealed class AppLifecycleManager : IDisposable
                 (stamina, words, preprocessedPng, regionDebug) =>
                 {
                     _debugOverlay?.UpdateSkillsData(stamina, words, preprocessedPng, regionDebug);
+                },
+                (rates, words, preprocessedPng, regionDebug) =>
+                {
+                    _debugOverlay?.UpdateXpAnalyserData(rates, words, preprocessedPng, regionDebug);
                 },
                 (characterName, staminaMinutes, isLogout) =>
                 {

@@ -5,6 +5,7 @@ using TibiaSquare.HuntMonitor.Obs;
 using TibiaSquare.HuntMonitor.Ocr;
 using TibiaSquare.HuntMonitor.Private;
 using TibiaSquare.HuntMonitor.Screenshots;
+using Windows.Graphics.Imaging;
 
 namespace TibiaSquare.HuntMonitor.Infrastructure;
 
@@ -14,6 +15,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
     private readonly OcrService _ocrService;
     private readonly IPanelLocator _regionLocator;
     private readonly IPanelLocator _skillsLocator;
+    private readonly IPanelLocator _xpAnalyserLocator;
     private readonly IHuntAnalyserParser _parser;
     private readonly ISessionLifecycle _sessionManager;
     private readonly ToastNotificationService _notifications;
@@ -24,20 +26,29 @@ public sealed class PeriodicCaptureLoop : IDisposable
     private readonly Action<bool>? _onAnalyserStatusChanged;
     private Action<HuntSnapshot?, IReadOnlyList<string>, IReadOnlyList<OcrWordInfo>, double?, byte[]?, string?>? _onOcrTick;
     private Action<int?, IReadOnlyList<OcrWordInfo>, byte[]?, string?>? _onSkillsTick;
+    private Action<XpAnalyserRates?, IReadOnlyList<OcrWordInfo>, byte[]?, string?>? _onXpAnalyserTick;
     private Action<string, int?, bool>? _onStaminaSync;
 
     private CancellationTokenSource? _cts;
     private Task? _loopTask;
     private IntPtr _hwnd;
     private bool? _lastAnalyserFound;
-    private int _consecutiveNoRawExp;
-    private bool _rawExpNotificationShown;
+    private readonly RawXpNotificationTracker _rawXpNotificationTracker = new();
     private int _consecutiveEmptyFrames;
     private DateTime _lastAnalyserFoundTime = DateTime.MinValue;
 
     // Rate-limit Skills panel reads — stamina changes slowly (1 min per real-time minute).
     private int _skillsReadCounter;
     private bool _skillsRetrying;
+
+    // The XP Analyser is checked periodically while absent, then on every frame while
+    // visible because its rolling rates are the preferred live source.
+    private int _xpAnalyserReadCounter;
+    private int _xpAnalyserRetryCount;
+    private bool _xpAnalyserVisible;
+    private DateTime _lastXpAnalyserFoundTime = DateTime.MinValue;
+    private const int XpAnalyserAbsentScanIntervalTicks = 5;
+    private const int XpAnalyserRetryLimit = 5;
 
     // Periodic stamina sync to server (every 60s during active hunting)
     private int? _lastStamina;
@@ -85,6 +96,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
         OcrService ocrService,
         IPanelLocator analyserLocator,
         IPanelLocator skillsLocator,
+        IPanelLocator xpAnalyserLocator,
         IHuntAnalyserParser parser,
         ISessionLifecycle sessionManager,
         ToastNotificationService notifications,
@@ -95,16 +107,19 @@ public sealed class PeriodicCaptureLoop : IDisposable
         Action<bool>? onAnalyserStatusChanged = null,
         Action<HuntSnapshot?, IReadOnlyList<string>, IReadOnlyList<OcrWordInfo>, double?, byte[]?, string?>? onOcrTick = null,
         Action<int?, IReadOnlyList<OcrWordInfo>, byte[]?, string?>? onSkillsTick = null,
+        Action<XpAnalyserRates?, IReadOnlyList<OcrWordInfo>, byte[]?, string?>? onXpAnalyserTick = null,
         Action<string, int?, bool>? onStaminaSync = null)
     {
         _onOcrTick = onOcrTick;
         _onSkillsTick = onSkillsTick;
+        _onXpAnalyserTick = onXpAnalyserTick;
         _onStaminaSync = onStaminaSync;
         _captureService = captureService;
         _ocrService = ocrService;
         _screenshotCapture = screenshotCapture;
         _regionLocator = analyserLocator;
         _skillsLocator = skillsLocator;
+        _xpAnalyserLocator = xpAnalyserLocator;
         _parser = parser;
         _sessionManager = sessionManager;
         _notifications = notifications;
@@ -129,6 +144,8 @@ public sealed class PeriodicCaptureLoop : IDisposable
         Stop();
         _captureService.StartCapture(hwnd);
         _lastAnalyserFoundTime = DateTime.UtcNow;
+        _lastXpAnalyserFoundTime = DateTime.UtcNow;
+        _rawXpNotificationTracker.Reset();
         _cts = new CancellationTokenSource();
         _loopTask = RunAsync(_cts.Token);
     }
@@ -139,6 +156,9 @@ public sealed class PeriodicCaptureLoop : IDisposable
         _captureService.StopCapture();
         _regionLocator.InvalidateCache();
         _skillsLocator.InvalidateCache();
+        _xpAnalyserLocator.InvalidateCache();
+        _xpAnalyserVisible = false;
+        _xpAnalyserRetryCount = 0;
         _cts?.Dispose();
         _cts = null;
     }
@@ -199,6 +219,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
 
         try
         {
+            var xpAnalyserRates = await ReadXpAnalyserAsync(bitmap);
             var result = await _regionLocator.LocateAsync(bitmap, _ocrService);
 
             bool analyserFound = result != null;
@@ -242,6 +263,17 @@ public sealed class PeriodicCaptureLoop : IDisposable
                     && _cts is { IsCancellationRequested: false }
                     && TibiaWindowDetector.IsCharacterWindow(_hwnd))
                     _notifications.NotifyAnalyserNotFound();
+
+                // A preprocessing experiment can make Tesseract reject an otherwise
+                // valid crop. Still publish that failed frame to the debug window so
+                // controls never appear frozen on the last successful preview.
+                _onOcrTick?.Invoke(
+                    null,
+                    Array.Empty<string>(),
+                    Array.Empty<OcrWordInfo>(),
+                    null,
+                    _regionLocator.LastPreprocessedPng,
+                    _regionLocator.LastRegionDebug);
                 return;
             }
 
@@ -321,6 +353,17 @@ public sealed class PeriodicCaptureLoop : IDisposable
             if (snapshot == null)
                 return;
 
+            bool huntAnalyserRawXpMissing = snapshot.XpGain.HasValue
+                && snapshot.RawXpGain == null
+                && snapshot.RawXpPerHour is null or 0;
+            bool xpAnalyserRawXpMissing = xpAnalyserRates?.XpPerHour.HasValue == true
+                && xpAnalyserRates.RawXpPerHour is null or 0;
+
+            // XP Analyser rates represent Tibia's rolling window and are more current
+            // than the Hunt Analyser's session-adjusted rates. Each field falls back
+            // independently when OCR can only read one of the two XP Analyser rows.
+            snapshot = XpAnalyserParser.ApplyRates(snapshot, xpAnalyserRates);
+
             // If all stat values are null (dashes), the crop is likely wrong
             // (e.g. only showing the monster/loot section). Invalidate and re-scan.
             if (snapshot.RawXpGain == null && snapshot.XpGain == null &&
@@ -340,6 +383,8 @@ public sealed class PeriodicCaptureLoop : IDisposable
                 return;
             }
 
+            TrackMissingRawXp(huntAnalyserRawXpMissing, xpAnalyserRawXpMissing);
+
             // Update cumulative trackers after validation passes
             if (snapshot.Loot.HasValue) _lastLoot = snapshot.Loot;
             if (snapshot.Damage.HasValue) _lastDamage = snapshot.Damage;
@@ -356,21 +401,6 @@ public sealed class PeriodicCaptureLoop : IDisposable
             if (_sessionManager.CurrentSession is { } session)
             {
                 snapshot = snapshot with { SessionTime = DateTime.UtcNow - session.StartedAtUtc };
-            }
-
-            // Track missing raw exp: if we're getting XP data but raw exp is consistently null
-            if (snapshot.XpGain != null && snapshot.RawXpGain == null)
-            {
-                _consecutiveNoRawExp++;
-                if (_consecutiveNoRawExp >= 10 && !_rawExpNotificationShown)
-                {
-                    _rawExpNotificationShown = true;
-                    _notifications.NotifyRawExpNotTracked();
-                }
-            }
-            else
-            {
-                _consecutiveNoRawExp = 0;
             }
 
             // Read stamina from Skills widget (rate-limited — stamina changes slowly,
@@ -426,6 +456,76 @@ public sealed class PeriodicCaptureLoop : IDisposable
         {
             bitmap.Dispose();
         }
+    }
+
+    private async Task<XpAnalyserRates?> ReadXpAnalyserAsync(SoftwareBitmap bitmap)
+    {
+        bool wasVisibleOrRetrying = _xpAnalyserVisible || _xpAnalyserRetryCount > 0;
+        bool shouldRead = wasVisibleOrRetrying
+            || ++_xpAnalyserReadCounter % XpAnalyserAbsentScanIntervalTicks == 0;
+        if (!shouldRead)
+            return null;
+
+        try
+        {
+            var result = await _xpAnalyserLocator.LocateAsync(bitmap, _ocrService);
+            if (result.HasValue)
+            {
+                _xpAnalyserVisible = true;
+                _xpAnalyserRetryCount = 0;
+                _lastXpAnalyserFoundTime = DateTime.UtcNow;
+                var rates = XpAnalyserParser.Parse(_parser, result.Value.Words);
+                _onXpAnalyserTick?.Invoke(rates, result.Value.Words,
+                    _xpAnalyserLocator.LastPreprocessedPng, _xpAnalyserLocator.LastRegionDebug);
+                return rates;
+            }
+
+            _xpAnalyserVisible = false;
+            if (wasVisibleOrRetrying)
+            {
+                _xpAnalyserRetryCount++;
+                if (_xpAnalyserRetryCount >= XpAnalyserRetryLimit)
+                    _xpAnalyserRetryCount = 0;
+            }
+            NotifyIfXpAnalyserMissing();
+
+            _onXpAnalyserTick?.Invoke(null, Array.Empty<OcrWordInfo>(),
+                _xpAnalyserLocator.LastPreprocessedPng, _xpAnalyserLocator.LastRegionDebug);
+        }
+        catch (Exception ex)
+        {
+            _logger.Debug($"XP Analyser panel read failed: {ex.Message}");
+            _xpAnalyserVisible = false;
+            _xpAnalyserRetryCount = Math.Min(_xpAnalyserRetryCount + 1, XpAnalyserRetryLimit - 1);
+            NotifyIfXpAnalyserMissing();
+        }
+
+        return null;
+    }
+
+    private void NotifyIfXpAnalyserMissing()
+    {
+        if (DateTime.UtcNow - _lastXpAnalyserFoundTime < NotifyGracePeriod
+            || _cts is not { IsCancellationRequested: false }
+            || !TibiaWindowDetector.IsCharacterWindow(_hwnd))
+        {
+            return;
+        }
+
+        _notifications.NotifyXpAnalyserNotFound();
+    }
+
+    private void TrackMissingRawXp(bool huntAnalyserMissing, bool xpAnalyserMissing)
+    {
+        var missing = _rawXpNotificationTracker.Observe(
+            huntAnalyserMissing,
+            xpAnalyserMissing);
+        if (missing == null)
+            return;
+
+        _notifications.NotifyRawExpNotTracked(
+            missing.HuntAnalyser,
+            missing.XpAnalyser);
     }
 
     /// <summary>
@@ -585,5 +685,6 @@ public sealed class PeriodicCaptureLoop : IDisposable
         _diagnostics.Dispose();
         _regionLocator.Dispose();
         _skillsLocator.Dispose();
+        _xpAnalyserLocator.Dispose();
     }
 }

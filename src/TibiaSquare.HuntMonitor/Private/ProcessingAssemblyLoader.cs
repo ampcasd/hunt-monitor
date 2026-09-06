@@ -96,6 +96,16 @@ public static class ProcessingAssemblyLoader
     }
 
     /// <summary>
+    /// Creates an XP Analyser panel locator from the Processing DLL.
+    /// </summary>
+    public static IPanelLocator? CreateXpAnalyserPanelLocator(ILogger logger, IImagePreprocessor preprocessor)
+    {
+        return CreateInstanceWithArgs<IPanelLocator>(
+            "TibiaSquare.HuntMonitor.Processing.XpAnalyserPanelLocator",
+            [logger, preprocessor]);
+    }
+
+    /// <summary>
     /// Creates an ISessionProcessor from the Processing DLL.
     /// Used by SyncService to process session data before upload.
     /// </summary>
