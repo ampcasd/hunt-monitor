@@ -5,6 +5,24 @@ namespace TibiaSquare.HuntMonitor.Tests.Infrastructure;
 
 public sealed class RawXpNotificationTrackerTests
 {
+    [Theory]
+    [InlineData(0L, 0L, null, false)]
+    [InlineData(0L, null, 0L, false)]
+    [InlineData(100L, 0L, null, false)]
+    [InlineData(100L, null, null, true)]
+    [InlineData(null, null, null, false)]
+    public void IsRawXpMissing_TreatsParsedZeroAsVisible(
+        long? xpValue,
+        long? rawXpValue,
+        long? alternateRawXpValue,
+        bool expected)
+    {
+        Assert.Equal(expected, RawXpNotificationTracker.IsRawXpMissing(
+            xpValue,
+            rawXpValue,
+            alternateRawXpValue));
+    }
+
     [Fact]
     public void Observe_ReportsBothAnalysersInOneResult()
     {
@@ -59,5 +77,18 @@ public sealed class RawXpNotificationTrackerTests
 
         for (int i = 0; i < RawXpNotificationTracker.ConfirmationFrames - 1; i++)
             Assert.Null(tracker.Observe(huntAnalyserMissing: true, xpAnalyserMissing: false));
+    }
+
+    [Fact]
+    public void DiscardPendingObservations_BreaksMissingFrameStreak()
+    {
+        var tracker = new RawXpNotificationTracker();
+
+        for (int i = 0; i < RawXpNotificationTracker.ConfirmationFrames - 1; i++)
+            Assert.Null(tracker.Observe(huntAnalyserMissing: false, xpAnalyserMissing: true));
+
+        tracker.DiscardPendingObservations();
+
+        Assert.Null(tracker.Observe(huntAnalyserMissing: false, xpAnalyserMissing: true));
     }
 }
