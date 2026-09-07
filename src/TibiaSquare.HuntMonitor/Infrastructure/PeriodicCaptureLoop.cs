@@ -45,6 +45,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
     // visible because its rolling rates are the preferred live source.
     private int _xpAnalyserReadCounter;
     private int _xpAnalyserRetryCount;
+    private int _consecutiveXpAnalyserEmptyFrames;
     private bool _xpAnalyserVisible;
     private DateTime _lastXpAnalyserFoundTime = DateTime.MinValue;
     private const int XpAnalyserAbsentScanIntervalTicks = 5;
@@ -75,8 +76,8 @@ public sealed class PeriodicCaptureLoop : IDisposable
     private const int RecycleAfterEmptyFrames = 10;
 
     /// <summary>
-    /// Suppress the "Hunt Analyser not visible" toast until we've seen this many
-    /// consecutive empty frames. Right after login OBS Game Capture takes a couple
+    /// Suppress analyser visibility toasts until we've seen this many consecutive
+    /// empty reads. Right after login OBS Game Capture takes a couple
     /// of seconds to hook the window and OCR needs a pass to warm up; firing on the
     /// first empty frame races against that startup and produces a spurious toast
     /// even though the analyser is open. At idle tick rate (3s), 4 ticks = ~12s.
@@ -84,10 +85,11 @@ public sealed class PeriodicCaptureLoop : IDisposable
     private const int NotifyAfterEmptyFrames = 4;
 
     /// <summary>
-    /// After the analyser is last seen, wait this long before showing the "not visible"
-    /// toast. Validation failures can invalidate the crop and cause a few consecutive OCR
-    /// misses even though the analyser IS visible; a short grace period avoids annoying
-    /// false-positive notifications.
+    /// After either analyser is last seen, wait this long before showing its "not visible"
+    /// toast. Validation failures can invalidate a crop and cause a few consecutive OCR
+    /// misses even though the analyser is visible; a short grace period avoids annoying
+    /// false-positive notifications. The same grace period and window prerequisites apply
+    /// to both Hunt Analyser and XP Analyser.
     /// </summary>
     private static readonly TimeSpan NotifyGracePeriod = TimeSpan.FromSeconds(20);
 
@@ -145,6 +147,11 @@ public sealed class PeriodicCaptureLoop : IDisposable
         _captureService.StartCapture(hwnd);
         _lastAnalyserFoundTime = DateTime.UtcNow;
         _lastXpAnalyserFoundTime = DateTime.UtcNow;
+        _consecutiveEmptyFrames = 0;
+        _consecutiveXpAnalyserEmptyFrames = 0;
+        _xpAnalyserReadCounter = XpAnalyserAbsentScanIntervalTicks - 1;
+        _xpAnalyserRetryCount = 0;
+        _xpAnalyserVisible = false;
         _rawXpNotificationTracker.Reset();
         _cts = new CancellationTokenSource();
         _loopTask = RunAsync(_cts.Token);
@@ -159,6 +166,8 @@ public sealed class PeriodicCaptureLoop : IDisposable
         _xpAnalyserLocator.InvalidateCache();
         _xpAnalyserVisible = false;
         _xpAnalyserRetryCount = 0;
+        _consecutiveXpAnalyserEmptyFrames = 0;
+        _rawXpNotificationTracker.DiscardPendingObservations();
         _cts?.Dispose();
         _cts = null;
     }
@@ -182,6 +191,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
             }
             catch (Exception ex)
             {
+                _rawXpNotificationTracker.DiscardPendingObservations();
                 _logger.Error($"Capture loop error: {ex.Message}");
             }
 
@@ -212,6 +222,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
         var bitmap = await _captureService.TryGetFrameAsync();
         if (bitmap == null)
         {
+            _rawXpNotificationTracker.DiscardPendingObservations();
             if (_tickCount <= 5 || _tickCount % 30 == 0)
                 _logger.Debug($"Tick {_tickCount}: no frame available");
             return;
@@ -231,11 +242,21 @@ public sealed class PeriodicCaptureLoop : IDisposable
 
             if (result == null)
             {
-                _consecutiveEmptyFrames++;
+                _rawXpNotificationTracker.DiscardPendingObservations();
+
+                // A detected panel whose candidate crop failed OCR validation is
+                // not evidence that the widget is hidden. Only a full-frame scan
+                // with no Hunt Analyser anchor advances the visibility warning.
+                if (IsConfirmedPanelMissing(_regionLocator.LastLocateStatus))
+                    _consecutiveEmptyFrames++;
+                else
+                    _consecutiveEmptyFrames = 0;
 
                 // Log at key thresholds only
-                if (_consecutiveEmptyFrames == 1 || _consecutiveEmptyFrames == NotifyAfterEmptyFrames
-                    || _consecutiveEmptyFrames % RecycleAfterEmptyFrames == 0)
+                if (_consecutiveEmptyFrames > 0
+                    && (_consecutiveEmptyFrames == 1
+                        || _consecutiveEmptyFrames == NotifyAfterEmptyFrames
+                        || _consecutiveEmptyFrames % RecycleAfterEmptyFrames == 0))
                 {
                     var seconds = _consecutiveEmptyFrames * IdleInterval.TotalSeconds;
                     _logger.Debug($"Tick {_tickCount}: analyser not found for {_consecutiveEmptyFrames} frames (~{seconds:F0}s)");
@@ -252,17 +273,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
                     await obs.RecycleGameCaptureAsync(attempt);
                 }
 
-                // Only notify if the loop is still active and the character is still logged in.
-                // After logout the window title drops the character name before the window
-                // detection loop fires TibiaLost, so we'd otherwise show a spurious
-                // "Hunt Analyser Not Visible" right before "Hunt Session Saved".
-                // Also wait for NotifyAfterEmptyFrames consecutive misses so we don't race
-                // OBS Game Capture warm-up right after login.
-                if (_consecutiveEmptyFrames >= NotifyAfterEmptyFrames
-                    && DateTime.UtcNow - _lastAnalyserFoundTime >= NotifyGracePeriod
-                    && _cts is { IsCancellationRequested: false }
-                    && TibiaWindowDetector.IsCharacterWindow(_hwnd))
-                    _notifications.NotifyAnalyserNotFound();
+                NotifyIfAnalysersMissing();
 
                 // A preprocessing experiment can make Tesseract reject an otherwise
                 // valid crop. Still publish that failed frame to the debug window so
@@ -278,6 +289,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
             }
 
             _consecutiveEmptyFrames = 0;
+            NotifyIfAnalysersMissing();
 
             var (_, words) = result.Value;
 
@@ -345,19 +357,25 @@ public sealed class PeriodicCaptureLoop : IDisposable
             // Balance. That crop still OCRs cleanly, but it omits the XP rows we need.
             if (IsCropMissingTrackedRows(lines))
             {
+                _rawXpNotificationTracker.DiscardPendingObservations();
                 _logger.Debug($"Invalidating analyser crop: OCR starts below tracked rows ({lines.FirstOrDefault() ?? "no lines"})");
                 _regionLocator.InvalidateCache();
                 return;
             }
 
             if (snapshot == null)
+            {
+                _rawXpNotificationTracker.DiscardPendingObservations();
                 return;
+            }
 
-            bool huntAnalyserRawXpMissing = snapshot.XpGain.HasValue
-                && snapshot.RawXpGain == null
-                && snapshot.RawXpPerHour is null or 0;
-            bool xpAnalyserRawXpMissing = xpAnalyserRates?.XpPerHour.HasValue == true
-                && xpAnalyserRates.RawXpPerHour is null or 0;
+            bool huntAnalyserRawXpMissing = RawXpNotificationTracker.IsRawXpMissing(
+                snapshot.XpPerHour,
+                snapshot.RawXpPerHour,
+                snapshot.RawXpGain);
+            bool xpAnalyserRawXpMissing = RawXpNotificationTracker.IsRawXpMissing(
+                xpAnalyserRates?.XpPerHour,
+                xpAnalyserRates?.RawXpPerHour);
 
             // XP Analyser rates represent Tibia's rolling window and are more current
             // than the Hunt Analyser's session-adjusted rates. Each field falls back
@@ -370,6 +388,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
                 snapshot.Loot == null && snapshot.Supplies == null &&
                 snapshot.Damage == null && snapshot.Healing == null)
             {
+                _rawXpNotificationTracker.DiscardPendingObservations();
                 _regionLocator.InvalidateCache();
                 return;
             }
@@ -379,11 +398,16 @@ public sealed class PeriodicCaptureLoop : IDisposable
             // when the panel is scrolled and labels aren't recognized).
             if (_sessionManager.CurrentSession != null && !ValidateSnapshot(snapshot))
             {
+                _rawXpNotificationTracker.DiscardPendingObservations();
                 _regionLocator.InvalidateCache();
                 return;
             }
 
-            TrackMissingRawXp(huntAnalyserRawXpMissing, xpAnalyserRawXpMissing);
+            TrackMissingRawXp(
+                huntAnalyserRawXpMissing,
+                xpAnalyserRawXpMissing,
+                snapshot,
+                xpAnalyserRates);
 
             // Update cumulative trackers after validation passes
             if (snapshot.Loot.HasValue) _lastLoot = snapshot.Loot;
@@ -473,6 +497,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
             {
                 _xpAnalyserVisible = true;
                 _xpAnalyserRetryCount = 0;
+                _consecutiveXpAnalyserEmptyFrames = 0;
                 _lastXpAnalyserFoundTime = DateTime.UtcNow;
                 var rates = XpAnalyserParser.Parse(_parser, result.Value.Words);
                 _onXpAnalyserTick?.Invoke(rates, result.Value.Words,
@@ -481,13 +506,15 @@ public sealed class PeriodicCaptureLoop : IDisposable
             }
 
             _xpAnalyserVisible = false;
-            if (wasVisibleOrRetrying)
-            {
-                _xpAnalyserRetryCount++;
-                if (_xpAnalyserRetryCount >= XpAnalyserRetryLimit)
-                    _xpAnalyserRetryCount = 0;
-            }
-            NotifyIfXpAnalyserMissing();
+            // Failed crop validation means the widget was detected and is being
+            // re-cropped; it must not count toward a "not visible" notification.
+            if (IsConfirmedPanelMissing(_xpAnalyserLocator.LastLocateStatus))
+                _consecutiveXpAnalyserEmptyFrames++;
+            else
+                _consecutiveXpAnalyserEmptyFrames = 0;
+            _xpAnalyserRetryCount++;
+            if (_xpAnalyserRetryCount >= XpAnalyserRetryLimit)
+                _xpAnalyserRetryCount = 0;
 
             _onXpAnalyserTick?.Invoke(null, Array.Empty<OcrWordInfo>(),
                 _xpAnalyserLocator.LastPreprocessedPng, _xpAnalyserLocator.LastRegionDebug);
@@ -497,25 +524,44 @@ public sealed class PeriodicCaptureLoop : IDisposable
             _logger.Debug($"XP Analyser panel read failed: {ex.Message}");
             _xpAnalyserVisible = false;
             _xpAnalyserRetryCount = Math.Min(_xpAnalyserRetryCount + 1, XpAnalyserRetryLimit - 1);
-            NotifyIfXpAnalyserMissing();
+            _consecutiveXpAnalyserEmptyFrames = 0;
         }
 
         return null;
     }
 
-    private void NotifyIfXpAnalyserMissing()
+    private void NotifyIfAnalysersMissing()
     {
-        if (DateTime.UtcNow - _lastXpAnalyserFoundTime < NotifyGracePeriod
+        var now = DateTime.UtcNow;
+        bool huntAnalyserMissing = _consecutiveEmptyFrames >= NotifyAfterEmptyFrames
+            && now - _lastAnalyserFoundTime >= NotifyGracePeriod;
+        bool xpAnalyserMissing = _consecutiveXpAnalyserEmptyFrames >= NotifyAfterEmptyFrames
+            && now - _lastXpAnalyserFoundTime >= NotifyGracePeriod;
+
+        if ((!huntAnalyserMissing && !xpAnalyserMissing)
             || _cts is not { IsCancellationRequested: false }
             || !TibiaWindowDetector.IsCharacterWindow(_hwnd))
         {
             return;
         }
 
-        _notifications.NotifyXpAnalyserNotFound();
+        if (_notifications.NotifyAnalysersNotFound(huntAnalyserMissing, xpAnalyserMissing))
+        {
+            _logger.Info(
+                $"Analyser visibility warning confirmed " +
+                $"(Hunt Analyser missing={huntAnalyserMissing}, XP Analyser missing={xpAnalyserMissing}; " +
+                $"Hunt misses={_consecutiveEmptyFrames}, XP misses={_consecutiveXpAnalyserEmptyFrames})");
+        }
     }
 
-    private void TrackMissingRawXp(bool huntAnalyserMissing, bool xpAnalyserMissing)
+    internal static bool IsConfirmedPanelMissing(PanelLocateStatus status) =>
+        status == PanelLocateStatus.NotFound;
+
+    private void TrackMissingRawXp(
+        bool huntAnalyserMissing,
+        bool xpAnalyserMissing,
+        HuntSnapshot snapshot,
+        XpAnalyserRates? xpAnalyserRates)
     {
         var missing = _rawXpNotificationTracker.Observe(
             huntAnalyserMissing,
@@ -523,10 +569,21 @@ public sealed class PeriodicCaptureLoop : IDisposable
         if (missing == null)
             return;
 
+        _logger.Info(
+            $"Raw XP visibility warning confirmed after {RawXpNotificationTracker.ConfirmationFrames} frames " +
+            $"(Hunt Analyser missing={missing.HuntAnalyser}, XP Analyser missing={missing.XpAnalyser}); " +
+            $"Hunt values [XP Gain={FormatObservedValue(snapshot.XpGain)}, " +
+            $"Raw XP Gain={FormatObservedValue(snapshot.RawXpGain)}, " +
+            $"Raw XP/h={FormatObservedValue(snapshot.RawXpPerHour)}]; " +
+            $"XP Analyser values [XP/h={FormatObservedValue(xpAnalyserRates?.XpPerHour)}, " +
+            $"Raw XP/h={FormatObservedValue(xpAnalyserRates?.RawXpPerHour)}]");
         _notifications.NotifyRawExpNotTracked(
             missing.HuntAnalyser,
             missing.XpAnalyser);
     }
+
+    private static string FormatObservedValue(long? value) =>
+        value?.ToString() ?? "missing";
 
     /// <summary>
     /// Cross-field validation to detect field misassignment caused by the parser's

@@ -13,6 +13,20 @@ internal sealed class RawXpNotificationTracker
     private bool _huntAnalyserReported;
     private bool _xpAnalyserReported;
 
+    /// <summary>
+    /// A parsed zero is still proof that the Raw XP row is visible. Only a missing
+    /// nullable value means OCR did not find the row.
+    /// </summary>
+    internal static bool IsRawXpMissing(
+        long? xpValue,
+        long? rawXpValue,
+        long? alternateRawXpValue = null)
+    {
+        return xpValue.HasValue
+            && !rawXpValue.HasValue
+            && !alternateRawXpValue.HasValue;
+    }
+
     public MissingRawXpSources? Observe(
         bool huntAnalyserMissing,
         bool xpAnalyserMissing)
@@ -38,9 +52,14 @@ internal sealed class RawXpNotificationTracker
 
     public void Reset()
     {
-        _consecutiveHuntAnalyserMisses = 0;
-        _consecutiveXpAnalyserMisses = 0;
+        DiscardPendingObservations();
         _huntAnalyserReported = false;
         _xpAnalyserReported = false;
+    }
+
+    public void DiscardPendingObservations()
+    {
+        _consecutiveHuntAnalyserMisses = 0;
+        _consecutiveXpAnalyserMisses = 0;
     }
 }

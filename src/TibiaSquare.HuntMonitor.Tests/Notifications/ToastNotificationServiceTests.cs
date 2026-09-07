@@ -8,6 +8,29 @@ namespace TibiaSquare.HuntMonitor.Tests.Notifications;
 public sealed class ToastNotificationServiceTests
 {
     [Theory]
+    [InlineData(true, false, "Hunt Analyser not visible")]
+    [InlineData(false, true, "XP Analyser not visible")]
+    [InlineData(true, true, "Analysers not visible")]
+    public void AnalyserVisibilityWarning_GroupsMissingWidgets(
+        bool huntAnalyserMissing,
+        bool xpAnalyserMissing,
+        string expectedTitle)
+    {
+        var content = ToastNotificationService.BuildAnalysersNotFoundContent(
+            huntAnalyserMissing,
+            xpAnalyserMissing);
+
+        Assert.NotNull(content);
+        Assert.Equal(expectedTitle, content.Value.Title);
+    }
+
+    [Fact]
+    public void AnalyserVisibilityWarning_IsSuppressedWhenBothWidgetsAreVisible()
+    {
+        Assert.Null(ToastNotificationService.BuildAnalysersNotFoundContent(false, false));
+    }
+
+    [Theory]
     [InlineData(true, false, "Hunt Analyser settings")]
     [InlineData(false, true, "XP Analyser settings")]
     [InlineData(true, true, "both Hunt Analyser and XP Analyser settings")]

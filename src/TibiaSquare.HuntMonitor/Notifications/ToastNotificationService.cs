@@ -6,8 +6,7 @@ namespace TibiaSquare.HuntMonitor.Notifications;
 
 public sealed class ToastNotificationService : IDisposable
 {
-    private DateTime _lastAnalyserNotFound = DateTime.MinValue;
-    private DateTime _lastXpAnalyserNotFound = DateTime.MinValue;
+    private DateTime _lastAnalysersNotFound = DateTime.MinValue;
     private static readonly TimeSpan AnalyserNotFoundCooldown = TimeSpan.FromMinutes(5);
 
     public void NotifySessionStarted(HuntSession session)
@@ -85,24 +84,43 @@ public sealed class ToastNotificationService : IDisposable
 
     public void NotifyAnalyserNotFound()
     {
-        var now = DateTime.UtcNow;
-        if (now - _lastAnalyserNotFound < AnalyserNotFoundCooldown)
-            return;
-
-        _lastAnalyserNotFound = now;
-        Show("Hunt Analyser not visible",
-            "Is it open and not covered by a tibia popup?");
+        NotifyAnalysersNotFound(huntAnalyserMissing: true, xpAnalyserMissing: false);
     }
 
     public void NotifyXpAnalyserNotFound()
     {
-        var now = DateTime.UtcNow;
-        if (now - _lastXpAnalyserNotFound < AnalyserNotFoundCooldown)
-            return;
+        NotifyAnalysersNotFound(huntAnalyserMissing: false, xpAnalyserMissing: true);
+    }
 
-        _lastXpAnalyserNotFound = now;
-        Show("XP Analyser not visible",
-            "Open it in Tibia and keep it uncovered to use rolling XP rates");
+    public bool NotifyAnalysersNotFound(bool huntAnalyserMissing, bool xpAnalyserMissing)
+    {
+        var content = BuildAnalysersNotFoundContent(huntAnalyserMissing, xpAnalyserMissing);
+        if (content == null)
+            return false;
+
+        var now = DateTime.UtcNow;
+        if (now - _lastAnalysersNotFound < AnalyserNotFoundCooldown)
+            return false;
+
+        _lastAnalysersNotFound = now;
+        Show(content.Value.Title, content.Value.Message);
+        return true;
+    }
+
+    internal static (string Title, string Message)? BuildAnalysersNotFoundContent(
+        bool huntAnalyserMissing,
+        bool xpAnalyserMissing)
+    {
+        return (huntAnalyserMissing, xpAnalyserMissing) switch
+        {
+            (true, true) => ("Analysers not visible",
+                "Open Hunt Analyser and XP Analyser in Tibia and keep them uncovered"),
+            (true, false) => ("Hunt Analyser not visible",
+                "Is it open and not covered by a Tibia popup?"),
+            (false, true) => ("XP Analyser not visible",
+                "Open it in Tibia and keep it uncovered to use rolling XP rates"),
+            _ => null,
+        };
     }
 
     public void NotifyRawExpNotTracked(bool huntAnalyserMissing, bool xpAnalyserMissing)
