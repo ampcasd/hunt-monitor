@@ -2,6 +2,9 @@ namespace TibiaSquare.HuntMonitor.Models;
 
 public sealed class StoredSnapshot
 {
+    public string? OcrProvenance { get; init; }
+    public string RawXpRateQuality { get; init; } = "unverified";
+    public string XpRateQuality { get; init; } = "unverified";
     public long Id { get; init; }
     public required string SessionId { get; init; }
     public int SessionTimeSeconds { get; init; }

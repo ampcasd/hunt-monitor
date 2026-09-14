@@ -97,6 +97,32 @@ public sealed class XpAnalyserParserTests
         Assert.Equal(1_000, result.XpGain);
     }
 
+    [Fact]
+    public void Parse_JoinsTheWholeNumericSpan()
+    {
+        OcrWordInfo[] words = [new("XP/h:", 8, 40, 42, 12),
+            new("6,", 90, 40, 15, 12), new("312,450", 107, 40, 60, 12)];
+        Assert.Equal(6_312_450, XpAnalyserParser.Parse(Parser, words)?.XpPerHour);
+    }
+
+    [Fact]
+    public void Parse_RejectsAnUnknownRawLabelInsteadOfCallingItAdjustedXp()
+    {
+        OcrWordInfo[] words = [new("Rax", 8, 40, 28, 12),
+            new("XP/h:", 38, 40, 42, 12), new("6,312,450", 92, 40, 70, 12)];
+        Assert.Null(XpAnalyserParser.Parse(Parser, words));
+    }
+
+    [Fact]
+    public void Parse_RejectsDuplicateAndLowConfidenceRateRows()
+    {
+        OcrWordInfo[] words = [new("XP/h:", 8, 40, 42, 12), new("6,312,450", 92, 40, 70, 12),
+            new("XP/h:", 8, 60, 42, 12), new("3,942,100", 92, 60, 70, 12)];
+        Assert.Null(XpAnalyserParser.Parse(Parser, words));
+        Assert.Null(XpAnalyserParser.Parse(Parser, [new("XP/h:", 8, 40, 42, 12),
+            new("6,312,450", 92, 40, 70, 12, 20)]));
+    }
+
     private sealed class RowParser : IHuntAnalyserParser
     {
         public List<List<OcrWordInfo>> GroupIntoRows(IReadOnlyList<OcrWordInfo> words) => words
