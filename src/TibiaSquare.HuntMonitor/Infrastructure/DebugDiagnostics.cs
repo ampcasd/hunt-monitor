@@ -15,6 +15,9 @@ public sealed class DebugDiagnostics : IDisposable
     private readonly string _captureDir;
     private readonly StreamWriter _jsonl;
     private readonly object _lock = new();
+    private long? _lastRawGain;
+    private long? _lastXpGain;
+    private long _highestRawRate;
     private DateTime _lastImageSave = DateTime.MinValue;
     private static readonly TimeSpan ImageSaveInterval = TimeSpan.FromSeconds(10);
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
@@ -47,21 +50,39 @@ public sealed class DebugDiagnostics : IDisposable
         HuntSnapshot? snapshot,
         byte[]? preprocessedPng,
         SessionState sessionState,
-        int consecutiveCacheMisses)
+        int consecutiveCacheMisses,
+        string decision = "parsed",
+        XpAnalyserRates? xpRates = null,
+        byte[]? xpPng = null)
     {
         var utcNow = DateTime.UtcNow;
         bool allZeros = snapshot is { XpGain: null or 0, RawXpGain: null or 0, Loot: null or 0,
             Supplies: null or 0, Damage: null or 0, Healing: null or 0 }
             && snapshot.KilledMonsters.Count == 0;
 
-        // Save image only on all-zeros ticks, throttled to once per 10s
+        bool counterJump = snapshot != null &&
+            ((snapshot.RawXpGain.HasValue && _lastRawGain.HasValue &&
+              Math.Abs(snapshot.RawXpGain.Value - _lastRawGain.Value) > 100_000) ||
+             (snapshot.XpGain.HasValue && _lastXpGain.HasValue &&
+              Math.Abs(snapshot.XpGain.Value - _lastXpGain.Value) > 100_000));
+        bool recordCandidate = snapshot?.RawXpPerHour > _highestRawRate;
+        bool anomaly = allZeros || counterJump || recordCandidate || decision.StartsWith("rejected");
+        if (snapshot != null)
+        {
+            _lastRawGain = snapshot.RawXpGain;
+            _lastXpGain = snapshot.XpGain;
+            _highestRawRate = Math.Max(_highestRawRate, snapshot.RawXpPerHour ?? 0);
+        }
+        // Keep bounded panel evidence for plausible-looking errors, not only zeros.
         bool imageSaved = false;
-        if (allZeros && preprocessedPng != null && utcNow - _lastImageSave >= ImageSaveInterval)
+        if (anomaly && preprocessedPng != null && utcNow - _lastImageSave >= ImageSaveInterval)
         {
             var imgPath = Path.Combine(_captureDir, $"fail-t{tickCount}-{utcNow:HHmmss}.png");
             try
             {
                 File.WriteAllBytes(imgPath, preprocessedPng);
+                if (xpPng != null) File.WriteAllBytes(Path.ChangeExtension(imgPath, ".xp.png"), xpPng);
+                CleanupOldPngs(keep: 100);
                 _lastImageSave = utcNow;
                 imageSaved = true;
             }
@@ -71,6 +92,7 @@ public sealed class DebugDiagnostics : IDisposable
         var wordSummaries = words.Select(w => new
         {
             t = w.Text,
+            confidence = w.Confidence,
             x = Math.Round(w.X, 1),
             y = Math.Round(w.Y, 1),
             w = Math.Round(w.Width, 1),
@@ -79,6 +101,13 @@ public sealed class DebugDiagnostics : IDisposable
 
         var entry = new
         {
+            parserVersion = 2,
+            decision,
+            counterJump,
+            recordCandidate,
+            xpAnalyser = xpRates,
+            provenance = snapshot?.OcrProvenance,
+            ocrWords = wordSummaries,
             tick = tickCount,
             ts = utcNow.ToString("HH:mm:ss.fff"),
             state = sessionState.ToString(),
@@ -93,6 +122,7 @@ public sealed class DebugDiagnostics : IDisposable
                 xp = snapshot.XpGain,
                 rawXp = snapshot.RawXpGain,
                 xph = snapshot.XpPerHour,
+                rawXph = snapshot.RawXpPerHour,
                 loot = snapshot.Loot,
                 sup = snapshot.Supplies,
                 bal = snapshot.Balance,

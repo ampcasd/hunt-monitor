@@ -51,7 +51,7 @@ public sealed class SyncService
             }
 
             var processed = _processor.Process(session, allSnapshots);
-            var payload = BuildSyncPayload(session, processed);
+            var payload = BuildSyncPayload(session, processed, allSnapshots);
             await PostSessionAsync(payload);
             _store.MarkSynced(session.Id);
             _logger.Info($"Session {session.Id} synced successfully");
@@ -91,7 +91,7 @@ public sealed class SyncService
                 if (allSnapshots.Count == 0) continue;
 
                 var processed = _processor.Process(session, allSnapshots);
-                var payload = BuildSyncPayload(session, processed);
+                var payload = BuildSyncPayload(session, processed, allSnapshots);
                 await PostSessionAsync(payload);
                 _store.MarkSynced(session.Id);
                 _logger.Info($"Pending session {session.Id} synced");
@@ -208,7 +208,7 @@ public sealed class SyncService
         }
     }
 
-    private SyncPayload BuildSyncPayload(HuntSession session, ProcessedSession processed)
+    private SyncPayload BuildSyncPayload(HuntSession session, ProcessedSession processed, List<StoredSnapshot> observations)
     {
         return new SyncPayload
         {
@@ -218,9 +218,11 @@ public sealed class SyncService
             EndedAt = session.EndedAtUtc?.ToString("o"),
             ActiveDurationSeconds = session.ActiveDurationSeconds,
             EndReason = session.EndReason,
-            // V3: rolling rates drive averages/charts, while peaks remain the
-            // highest accepted frame-level Hunt Analyser readings.
-            RateCalculationVersion = 3,
+            RateCalculationVersion = 4,
+            AppVersion = typeof(SyncService).Assembly.GetName().Version?.ToString(),
+            XpObservations = observations.OrderBy(s => s.SessionTimeSeconds)
+                .DistinctBy(s => s.SessionTimeSeconds)
+                .Select(s => new long?[] { s.SessionTimeSeconds, s.RawXpGain, s.XpGain }).ToList(),
             PeakXpPerHour = processed.PeakXpPerHour,
             AverageTopXpPerHour = processed.AverageTopXpPerHour,
             PeakRawXpPerHour = processed.PeakRawXpPerHour,

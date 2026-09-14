@@ -68,13 +68,13 @@ public sealed class SqliteSessionStore : IDisposable
                  raw_xp_gain, xp_gain, raw_xp_per_hour, xp_per_hour,
                  loot, supplies, balance,
                  damage, damage_per_hour, healing, healing_per_hour,
-                 stamina)
+                 stamina, ocr_provenance)
             VALUES
                 (@sessionId, @timestamp, @sessionTime,
                  @rawXpGain, @xpGain, @rawXpPerHour, @xpPerHour,
                  @loot, @supplies, @balance,
                  @damage, @damagePerHour, @healing, @healingPerHour,
-                 @stamina);
+                 @stamina, @ocrProvenance);
             SELECT last_insert_rowid();
             """;
         cmd.Parameters.AddWithValue("@sessionId", sessionId);
@@ -93,6 +93,7 @@ public sealed class SqliteSessionStore : IDisposable
         cmd.Parameters.AddWithValue("@healingPerHour", (object?)snapshot.HealingPerHour ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@stamina", (object?)snapshot.Stamina ?? DBNull.Value);
 
+        cmd.Parameters.AddWithValue("@ocrProvenance", (object?)snapshot.OcrProvenance ?? DBNull.Value);
         var snapshotId = (long)cmd.ExecuteScalar()!;
 
         InsertMonsters(snapshotId, snapshot.KilledMonsters);
@@ -181,7 +182,7 @@ public sealed class SqliteSessionStore : IDisposable
         cmd.CommandText = """
             SELECT id, session_time_seconds, raw_xp_gain, xp_gain, raw_xp_per_hour, xp_per_hour,
                    loot, supplies, balance, damage, damage_per_hour, healing, healing_per_hour,
-                   stamina
+                   stamina, ocr_provenance
             FROM hunt_snapshots
             WHERE session_id = @sessionId
             ORDER BY id DESC
@@ -210,6 +211,7 @@ public sealed class SqliteSessionStore : IDisposable
             DamagePerHour = reader.IsDBNull(10) ? null : reader.GetInt64(10),
             Healing = reader.IsDBNull(11) ? null : reader.GetInt64(11),
             HealingPerHour = reader.IsDBNull(12) ? null : reader.GetInt64(12),
+            OcrProvenance = reader.IsDBNull(14) ? null : reader.GetString(14),
             Stamina = reader.IsDBNull(13) ? null : reader.GetInt32(13),
             KilledMonsters = monsters,
         };
@@ -306,7 +308,7 @@ public sealed class SqliteSessionStore : IDisposable
         cmd.CommandText = """
             SELECT id, session_time_seconds, raw_xp_gain, xp_gain, raw_xp_per_hour, xp_per_hour,
                    loot, supplies, balance, damage, damage_per_hour, healing, healing_per_hour,
-                   stamina
+                   stamina, ocr_provenance
             FROM hunt_snapshots
             WHERE session_id = @sessionId
             ORDER BY id ASC
@@ -336,7 +338,8 @@ public sealed class SqliteSessionStore : IDisposable
                 DamagePerHour = reader.IsDBNull(10) ? null : reader.GetInt64(10),
                 Healing = reader.IsDBNull(11) ? null : reader.GetInt64(11),
                 HealingPerHour = reader.IsDBNull(12) ? null : reader.GetInt64(12),
-                Stamina = reader.IsDBNull(13) ? null : reader.GetInt32(13),
+                OcrProvenance = reader.IsDBNull(14) ? null : reader.GetString(14),
+            Stamina = reader.IsDBNull(13) ? null : reader.GetInt32(13),
                 KilledMonsters = monsters,
             });
         }

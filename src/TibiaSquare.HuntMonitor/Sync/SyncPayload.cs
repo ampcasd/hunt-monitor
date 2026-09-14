@@ -4,6 +4,12 @@ namespace TibiaSquare.HuntMonitor.Sync;
 
 public sealed class SyncPayload
 {
+    [JsonPropertyName("appVersion")]
+    public string? AppVersion { get; init; }
+
+    [JsonPropertyName("xpObservations")]
+    public List<long?[]>? XpObservations { get; init; }
+
     [JsonPropertyName("id")]
     public required string Id { get; init; }
 

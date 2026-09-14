@@ -308,9 +308,12 @@ public sealed class PeriodicCaptureLoop : IDisposable
             // Push to debug overlay if open
             _onOcrTick?.Invoke(snapshot, lines, words, valueColumnX, _regionLocator.LastPreprocessedPng, _regionLocator.LastRegionDebug);
 
-            // Save per-tick diagnostics to disk for live debugging
+
+            // Preserve failed parses/crops too; the final accepted/rejected
+            // decision below records the merged analyser sources separately.
             _diagnostics.RecordTick(_tickCount, words, valueColumnX, lines, snapshot,
-                _regionLocator.LastPreprocessedPng, _sessionManager.State, _consecutiveEmptyFrames);
+                _regionLocator.LastPreprocessedPng, _sessionManager.State, _consecutiveEmptyFrames,
+                "parsed", xpAnalyserRates, _xpAnalyserLocator.LastPreprocessedPng);
 
             // Determine if this is an anomaly worth detailed logging
             bool isAnomaly = snapshot == null
@@ -381,6 +384,16 @@ public sealed class PeriodicCaptureLoop : IDisposable
             // than the Hunt Analyser's session-adjusted rates. Each field falls back
             // independently when OCR can only read one of the two XP Analyser rows.
             snapshot = XpAnalyserParser.ApplyRates(snapshot, xpAnalyserRates);
+            snapshot = snapshot with { OcrProvenance = System.Text.Json.JsonSerializer.Serialize(new {
+                parserVersion = 2, snapshot.XpRateSource, snapshot.RawXpRateSource,
+                minimumConfidence = words.Where(w => w.Confidence.HasValue).Select(w => w.Confidence).DefaultIfEmpty().Min(),
+                assignment = "label-and-row"
+            }) };
+            void RecordDecision(string decision) => _diagnostics.RecordTick(
+                _tickCount, words, valueColumnX, lines, snapshot,
+                _regionLocator.LastPreprocessedPng, _sessionManager.State, _consecutiveEmptyFrames,
+                decision, xpAnalyserRates, _xpAnalyserLocator.LastPreprocessedPng);
+
 
             // If all stat values are null (dashes), the crop is likely wrong
             // (e.g. only showing the monster/loot section). Invalidate and re-scan.
@@ -398,11 +411,13 @@ public sealed class PeriodicCaptureLoop : IDisposable
             // when the panel is scrolled and labels aren't recognized).
             if (_sessionManager.CurrentSession != null && !ValidateSnapshot(snapshot))
             {
+                RecordDecision("rejected-validation");
                 _rawXpNotificationTracker.DiscardPendingObservations();
                 _regionLocator.InvalidateCache();
                 return;
             }
 
+            RecordDecision("accepted");
             TrackMissingRawXp(
                 huntAnalyserRawXpMissing,
                 xpAnalyserRawXpMissing,
@@ -699,16 +714,8 @@ public sealed class PeriodicCaptureLoop : IDisposable
             return false;
         }
 
-        // 3. Inverted XP ratio — XpPerHour should always be >= RawXpPerHour since
-        // boosts (stamina, store) multiply raw XP. An inversion means the fields are
-        // swapped or contain values from different rows.
-        if (snapshot.RawXpPerHour is > 0 && snapshot.XpPerHour is > 0
-            && snapshot.XpPerHour.Value < snapshot.RawXpPerHour.Value)
-        {
-            _logger.Debug($"Validation failed: XpPerHour ({snapshot.XpPerHour}) < RawXpPerHour ({snapshot.RawXpPerHour})");
-            return false;
-        }
-
+        // Rate-source identity is retained for diagnostics. Different analyser
+        // windows and XP modifiers make a universal raw/adjusted ratio invalid.
         return true;
     }
 

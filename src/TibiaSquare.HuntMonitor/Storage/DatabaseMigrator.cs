@@ -85,6 +85,10 @@ public static class DatabaseMigrator
         """
         ALTER TABLE hunt_snapshots ADD COLUMN stamina INTEGER;
         """,
+        // Retain the parser decision and source identity beside original counters.
+        """
+        ALTER TABLE hunt_snapshots ADD COLUMN ocr_provenance TEXT;
+        """,
     ];
 
     public static string GetDatabasePath()

@@ -15,20 +15,37 @@ public static class XpAnalyserParser
         long? xpPerHour = null;
         long? rawXpPerHour = null;
 
+        bool xpSeen = false, rawSeen = false;
         foreach (var row in parser.GroupIntoRows(words))
         {
-            string rowText = string.Join(" ", row.Select(word => word.Text));
-            if (!LooksLikeXpRate(rowText))
-                continue;
-
-            long? value = ParseRightmostValue(parser, row);
-            if (!value.HasValue || value.Value < 0)
-                continue;
-
-            if (LooksLikeRawRate(rowText))
-                rawXpPerHour = value;
-            else
-                xpPerHour = value;
+            if (row.Any(w => w.Confidence is < 50)) continue;
+            for (int split = 1; split < row.Count; split++)
+            {
+                string label = Normalize(string.Join(" ", row.Take(split).Select(w => w.Text)));
+                bool raw = label.StartsWith("raw") || label.StartsWith("ram") || label.StartsWith("ravv");
+                string rateLabel = raw ? label[(label.StartsWith("ravv") ? 4 : 3)..] : label;
+                if (rateLabel is not ("xph" or "xpfh" or "xpsh" or "xpih" or "xpth" or "xphour")) continue;
+                // Do not join values belonging to neighboring widgets on the same Y.
+                if (row[split].X < row[split - 1].Right) break;
+                if (Enumerable.Range(split + 1, row.Count - split - 1).Any(i =>
+                    row[i].X - row[i - 1].Right > Math.Max(12, row[i].Height * 2))) break;
+                // Parse the entire numeric span, never just its rightmost fragment.
+                string numeric = string.Concat(row.Skip(split).Select(w => w.Text));
+                if (!System.Text.RegularExpressions.Regex.IsMatch(numeric, @"^[0-9OoIl,\.]+(?:[kKmM]{1,2})?$")) break;
+                var value = parser.ParseNumber(numeric);
+                if (!value.HasValue || value < 0) break;
+                if (raw)
+                {
+                    rawXpPerHour = rawSeen ? null : value;
+                    rawSeen = true;
+                }
+                else
+                {
+                    xpPerHour = xpSeen ? null : value;
+                    xpSeen = true;
+                }
+                break;
+            }
         }
 
         var result = new XpAnalyserRates
@@ -46,6 +63,8 @@ public static class XpAnalyserParser
 
         return snapshot with
         {
+            XpRateSource = rates.XpPerHour.HasValue ? "xp-analyser" : snapshot.XpRateSource,
+            RawXpRateSource = rates.RawXpPerHour.HasValue ? "xp-analyser" : snapshot.RawXpRateSource,
             XpPerHour = rates.XpPerHour ?? snapshot.XpPerHour,
             RawXpPerHour = rates.RawXpPerHour ?? snapshot.RawXpPerHour
         };
@@ -71,27 +90,6 @@ public static class XpAnalyserParser
         return normalized.Contains("rawxp", StringComparison.Ordinal)
             || normalized.Contains("ramxp", StringComparison.Ordinal)
             || normalized.Contains("ravvxp", StringComparison.Ordinal);
-    }
-
-    private static long? ParseRightmostValue(
-        IHuntAnalyserParser parser,
-        IReadOnlyList<OcrWordInfo> row)
-    {
-        for (int i = row.Count - 1; i >= 0; i--)
-        {
-            var parsed = parser.ParseNumber(row[i].Text);
-            if (parsed.HasValue)
-                return parsed;
-
-            if (i > 0)
-            {
-                parsed = parser.ParseNumber(row[i - 1].Text + row[i].Text);
-                if (parsed.HasValue)
-                    return parsed;
-            }
-        }
-
-        return null;
     }
 
     private static string Normalize(string text) => new(

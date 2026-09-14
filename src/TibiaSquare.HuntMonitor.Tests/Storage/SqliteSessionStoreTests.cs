@@ -15,6 +15,20 @@ public class SqliteSessionStoreTests : IDisposable
     }
 
     [Fact]
+    public void Snapshot_RetainsSignedCountersAndOcrProvenance()
+    {
+        var session = new HuntSession { CharacterName = "TestChar" };
+        _store.CreateSession(session);
+        var snapshot = new HuntSnapshot { RawXpGain = -5_136_000, XpGain = 2_604_324,
+            OcrProvenance = "{\"parserVersion\":2,\"RawXpRateSource\":\"xp-analyser\"}" };
+        _store.InsertSnapshot(session.Id, snapshot, session.StartedAtUtc);
+        var stored = _store.GetAllSnapshots(session.Id).Single();
+        Assert.Equal(snapshot.RawXpGain, stored.RawXpGain);
+        Assert.Equal(snapshot.OcrProvenance, stored.OcrProvenance);
+        Assert.Equal(snapshot.OcrProvenance, _store.GetLastSnapshot(session.Id)?.OcrProvenance);
+    }
+
+    [Fact]
     public void CreateSession_And_GetUnfinished_ReturnsSessions()
     {
         var session = new HuntSession { CharacterName = "TestChar" };

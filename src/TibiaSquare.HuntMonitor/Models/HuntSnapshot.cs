@@ -2,6 +2,9 @@ namespace TibiaSquare.HuntMonitor.Models;
 
 public record HuntSnapshot
 {
+    public string XpRateSource { get; init; } = "hunt-analyser";
+    public string RawXpRateSource { get; init; } = "hunt-analyser";
+    public string? OcrProvenance { get; init; }
     public TimeSpan SessionTime { get; init; }
     public long? RawXpGain { get; init; }
     public long? XpGain { get; init; }
