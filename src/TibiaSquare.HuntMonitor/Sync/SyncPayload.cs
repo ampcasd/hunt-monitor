@@ -10,6 +10,15 @@ public sealed class SyncPayload
     [JsonPropertyName("xpObservations")]
     public List<long?[]>? XpObservations { get; init; }
 
+    [JsonPropertyName("captureMetadata")]
+    public Dictionary<string, string?>? CaptureMetadata { get; init; }
+
+    [JsonPropertyName("financialObservations")]
+    public List<long?[]>? FinancialObservations { get; init; }
+
+    [JsonPropertyName("baseline")]
+    public Dictionary<string, long?>? Baseline { get; init; }
+
     [JsonPropertyName("id")]
     public required string Id { get; init; }
 

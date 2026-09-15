@@ -385,7 +385,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
             // independently when OCR can only read one of the two XP Analyser rows.
             snapshot = XpAnalyserParser.ApplyRates(snapshot, xpAnalyserRates);
             snapshot = snapshot with { OcrProvenance = System.Text.Json.JsonSerializer.Serialize(new {
-                parserVersion = 2, snapshot.XpRateSource, snapshot.RawXpRateSource,
+                parserVersion = 3, snapshot.XpRateSource, snapshot.RawXpRateSource,
                 minimumConfidence = words.Where(w => w.Confidence.HasValue).Select(w => w.Confidence).DefaultIfEmpty().Min(),
                 assignment = "label-and-row"
             }) };
