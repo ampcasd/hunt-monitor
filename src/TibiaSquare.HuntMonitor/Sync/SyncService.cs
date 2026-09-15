@@ -51,6 +51,8 @@ public sealed class SyncService
             }
 
             var processed = _processor.Process(session, allSnapshots);
+            if (session.ActiveDurationSeconds >= 300 && !processed.AverageTopRawXpPerHour.HasValue)
+                _logger.Warn($"Session {session.Id}: raw XP needs review; preserving {allSnapshots.Count} observations, {processed.DownsampledSnapshots.Count} chart points");
             var payload = BuildSyncPayload(session, processed, allSnapshots);
             await PostSessionAsync(payload);
             _store.MarkSynced(session.Id);
@@ -218,11 +220,17 @@ public sealed class SyncService
             EndedAt = session.EndedAtUtc?.ToString("o"),
             ActiveDurationSeconds = session.ActiveDurationSeconds,
             EndReason = session.EndReason,
-            RateCalculationVersion = 4,
+            RateCalculationVersion = 5,
             AppVersion = typeof(SyncService).Assembly.GetName().Version?.ToString(),
             XpObservations = observations.OrderBy(s => s.SessionTimeSeconds)
                 .DistinctBy(s => s.SessionTimeSeconds)
                 .Select(s => new long?[] { s.SessionTimeSeconds, s.RawXpGain, s.XpGain }).ToList(),
+            CaptureMetadata = processed.DownsampledSnapshots.Where(s => s.OcrProvenance != null)
+                .GroupBy(s => s.SessionTimeSeconds).ToDictionary(g => g.Key.ToString(), g => g.First().OcrProvenance),
+            FinancialObservations = observations.OrderBy(s => s.SessionTimeSeconds).DistinctBy(s => s.SessionTimeSeconds)
+                .Select(s => new long?[] { s.SessionTimeSeconds, s.Loot, s.Supplies, s.Balance }).ToList(),
+            Baseline = new Dictionary<string, long?> { ["xp"] = (session.Baseline == null ? 0 : session.Baseline.XpGain), ["loot"] = (session.Baseline == null ? 0 : session.Baseline.Loot),
+                ["supplies"] = (session.Baseline == null ? 0 : session.Baseline.Supplies), ["balance"] = (session.Baseline == null ? 0 : session.Baseline.Balance) },
             PeakXpPerHour = processed.PeakXpPerHour,
             AverageTopXpPerHour = processed.AverageTopXpPerHour,
             PeakRawXpPerHour = processed.PeakRawXpPerHour,
@@ -343,6 +351,11 @@ public sealed class SyncService
             var body = await response.Content.ReadAsStringAsync();
             throw new HttpRequestException($"Sync failed: {response.StatusCode} - {body}");
         }
+        using var acknowledgement = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        if (!acknowledgement.RootElement.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.True)
+            throw new HttpRequestException("Server did not acknowledge a complete session revision");
+        if (acknowledgement.RootElement.TryGetProperty("reason", out var reason))
+            _logger.Info($"Session {payload.Id} sync outcome: {reason.GetString()}");
     }
 }
 
