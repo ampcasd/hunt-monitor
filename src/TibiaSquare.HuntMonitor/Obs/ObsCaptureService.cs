@@ -30,35 +30,15 @@ public sealed class ObsCaptureService : ICaptureService
     private const string SceneName = "Hunt Monitor";
     private const string SourceName = "Tibia Game Capture";
     private const string ImageFormat = "png";
-    private static readonly (int W, int H) DefaultResolution = (1920, 1080);
-
-    /// <summary>Current screenshot request dimensions — set dynamically to match the game window.</summary>
-    private int _screenshotWidth = DefaultResolution.W;
-    private int _screenshotHeight = DefaultResolution.H;
-
-    /// <summary>Currently configured game resolution (0×0 = not yet set).</summary>
-    private (int W, int H) _gameResolution;
+    private readonly ObsCaptureGeometry _geometry;
 
     public bool IsCapturing => _capturing && _identified;
-
-    /// <summary>The game resolution this service is configured for (0×0 if not yet set).</summary>
-    public (int W, int H) GameResolution => _gameResolution;
-
-    /// <summary>
-    /// Sets the screenshot dimensions to match the detected game resolution.
-    /// Called after detecting the Tibia window's client area.
-    /// </summary>
-    public void SetGameResolution(int width, int height)
-    {
-        _screenshotWidth = width;
-        _screenshotHeight = height;
-        _gameResolution = (width, height);
-    }
 
     public ObsCaptureService(ObsProcessManager processManager, ILogger logger)
     {
         _processManager = processManager;
         _logger = logger;
+        _geometry = new ObsCaptureGeometry(SendRequestInternalAsync, logger, SceneName, SourceName);
     }
 
     public void StartCapture(IntPtr hwnd)
@@ -579,6 +559,19 @@ public sealed class ObsCaptureService : ICaptureService
             // Disable audio on first frame request after connection
             await EnsureAudioDisabledAsync();
 
+            // OBS reports the actual captured pixels, independent of Windows DPI,
+            // monitor size, or a stale scene transform. Recheck on every frame so
+            // resizing/moving the game does not require a logout or OBS restart.
+            try
+            {
+                await _geometry.SynchronizeAsync();
+            }
+            catch (Exception ex)
+            {
+                // A busy OBS output must not prevent raw-source OCR capture.
+                _logger.Warn($"Could not update OBS capture geometry: {ex.Message}");
+            }
+
             var response = await SendRequestInternalAsync("GetSourceScreenshot", new JsonObject
             {
                 // Capture the raw input rather than the rendered scene. Scene-item
@@ -586,8 +579,7 @@ public sealed class ObsCaptureService : ICaptureService
                 // the game even while Game Capture itself is healthy.
                 ["sourceName"] = SourceName,
                 ["imageFormat"] = ImageFormat,
-                ["imageWidth"] = _screenshotWidth,
-                ["imageHeight"] = _screenshotHeight,
+                // Omit image dimensions to preserve the complete native source.
             });
 
             if (response == null) return null;

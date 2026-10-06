@@ -52,9 +52,6 @@ public sealed class AppLifecycleManager : IDisposable
     // Suppress "New Hunt Session" toast after a mob-change split (we already showed "New Mobs Detected")
     private bool _suppressNextStartNotification;
 
-    // Track last known game resolution to detect changes between sessions
-    private (int W, int H) _lastGameResolution;
-
     // Lazy initialization is shared by TibiaOpened and TibiaDetected. Keeping the
     // in-flight Task prevents the character event from racing ahead of storage and
     // session-manager setup on cold startup.
@@ -495,13 +492,6 @@ public sealed class AppLifecycleManager : IDisposable
         });
         _trayIconManager.UpdateTooltip("Hunt Analyser not visible");
 
-        // Detect game resolution from the client area of the Tibia window.
-        // We use this to set the OBS canvas and screenshot dimensions so that
-        // the full game window is captured regardless of aspect ratio (ultrawide, etc.).
-        var gameWidth = info.ClientWidth > 0 ? info.ClientWidth : 1920;
-        var gameHeight = info.ClientHeight > 0 ? info.ClientHeight : 1080;
-        _logger.Info($"Tibia monitor resolution: {gameWidth}×{gameHeight}");
-
         // Ensure OBS is ready (may already be running from OnTibiaOpened)
         var obsReady = await EnsureObsRunningAsync();
         if (!obsReady)
@@ -529,42 +519,6 @@ public sealed class AppLifecycleManager : IDisposable
 
             _obsCaptureService = new ObsCaptureService(_obsManager, _logger);
         }
-
-        // If the game resolution changed since last session, update OBS config and restart
-        if (_lastGameResolution.W != gameWidth || _lastGameResolution.H != gameHeight)
-        {
-            var obsDir = _obsManager?.ObsDirectory;
-            if (obsDir != null)
-            {
-                var canvasChanged = ObsConfigGenerator.UpdateCanvasSize(obsDir, gameWidth, gameHeight);
-                if (canvasChanged)
-                {
-                    _logger.Info($"Game resolution changed to {gameWidth}×{gameHeight} — restarting OBS");
-                    _obsCaptureService?.Dispose();
-                    _obsCaptureService = null;
-
-                    if (_obsManager != null)
-                    {
-                        var restarted = await _obsManager.RestartAsync();
-                        if (restarted)
-                        {
-                            _obsCaptureService = new ObsCaptureService(_obsManager, _logger);
-                        }
-                        else
-                        {
-                            _logger.Error("OBS restart failed after resolution change");
-                            _notifications.ShowError("OBS Error",
-                                "Failed to restart OBS with new resolution. Capture cannot begin.");
-                            return;
-                        }
-                    }
-                }
-                _lastGameResolution = (gameWidth, gameHeight);
-            }
-        }
-
-        // Configure screenshot dimensions to match the game resolution
-        _obsCaptureService?.SetGameResolution(gameWidth, gameHeight);
 
         try
         {

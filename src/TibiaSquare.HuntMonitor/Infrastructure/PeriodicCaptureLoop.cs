@@ -214,6 +214,7 @@ public sealed class PeriodicCaptureLoop : IDisposable
     }
 
     private int _tickCount;
+    private (int Width, int Height) _lastFrameSize;
     private DateTime _lastSummaryLogTime = DateTime.MinValue;
 
     private async Task TickAsync()
@@ -230,6 +231,21 @@ public sealed class PeriodicCaptureLoop : IDisposable
 
         try
         {
+            var frameSize = (bitmap.PixelWidth, bitmap.PixelHeight);
+            if (_lastFrameSize != frameSize)
+            {
+                _lastFrameSize = frameSize;
+                _regionLocator.InvalidateCache();
+                _skillsLocator.InvalidateCache();
+                _xpAnalyserLocator.InvalidateCache();
+                _xpAnalyserVisible = false;
+                _xpAnalyserRetryCount = 0;
+                _xpAnalyserReadCounter = XpAnalyserAbsentScanIntervalTicks - 1;
+                _skillsReadCounter = 0;
+                _rawXpNotificationTracker.DiscardPendingObservations();
+                _logger.Info($"Capture frame size changed to {bitmap.PixelWidth}×{bitmap.PixelHeight} — locating panels again");
+            }
+
             var xpAnalyserRates = await ReadXpAnalyserAsync(bitmap);
             var result = await _regionLocator.LocateAsync(bitmap, _ocrService);
 

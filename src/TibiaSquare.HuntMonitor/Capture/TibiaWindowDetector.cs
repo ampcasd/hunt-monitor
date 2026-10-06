@@ -16,12 +16,6 @@ public record TibiaWindowInfo(IntPtr Hwnd, string? CharacterName)
     /// <summary>Process executable name (e.g. "client.exe")</summary>
     public string? ExecutableName { get; init; }
 
-    /// <summary>Monitor resolution width in pixels (game rendering width).</summary>
-    public int ClientWidth { get; init; }
-
-    /// <summary>Monitor resolution height in pixels (game rendering height).</summary>
-    public int ClientHeight { get; init; }
-
     /// <summary>
     /// OBS Game Capture window match string in "Title:Class:Exe" format.
     /// </summary>
@@ -128,15 +122,12 @@ public static partial class TibiaWindowDetector
 
     private static TibiaWindowInfo BuildWindowInfo(IntPtr hwnd, string? characterName)
     {
-        var (monW, monH) = GetMonitorResolution(hwnd);
         var processId = GetProcessId(hwnd);
         return new TibiaWindowInfo(hwnd, characterName)
         {
             WindowClass = GetWindowClassName(hwnd),
             ExecutableName = GetProcessExeName(processId),
             ProcessId = processId,
-            ClientWidth = monW,
-            ClientHeight = monH,
         };
     }
 
@@ -202,45 +193,4 @@ public static partial class TibiaWindowDetector
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint lpdwProcessId);
 
-    /// <summary>
-    /// Returns the resolution of the monitor that the window is primarily on.
-    /// This matches the game's rendering resolution (unlike GetClientRect which
-    /// subtracts the title bar height in windowed mode).
-    /// </summary>
-    private static (int Width, int Height) GetMonitorResolution(IntPtr hwnd)
-    {
-        var hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        var info = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
-        if (GetMonitorInfo(hmon, ref info))
-        {
-            var w = info.rcMonitor.Right - info.rcMonitor.Left;
-            var h = info.rcMonitor.Bottom - info.rcMonitor.Top;
-            return (w, h);
-        }
-        return (1920, 1080); // fallback
-    }
-
-    private const int MONITOR_DEFAULTTONEAREST = 2;
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
-
-    [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetMonitorInfo(IntPtr hmon, ref MONITORINFO lpmi);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MONITORINFO
-    {
-        public int cbSize;
-        public RECT rcMonitor;
-        public RECT rcWork;
-        public uint dwFlags;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT
-    {
-        public int Left, Top, Right, Bottom;
-    }
 }
