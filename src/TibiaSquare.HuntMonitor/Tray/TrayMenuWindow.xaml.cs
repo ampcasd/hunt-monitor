@@ -520,7 +520,7 @@ public partial class TrayMenuWindow : Window
 
             if (unsyncedCount == 0)
             {
-                _syncStatusItem.Text = "All sessions synced";
+                _syncStatusItem.Text = "All completed sessions synced";
                 _syncActionItem.Visibility = Visibility.Collapsed;
             }
             else

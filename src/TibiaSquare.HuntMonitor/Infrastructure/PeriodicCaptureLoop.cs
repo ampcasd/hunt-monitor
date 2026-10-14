@@ -188,6 +188,9 @@ public sealed class PeriodicCaptureLoop : IDisposable
             try
             {
                 await TickAsync();
+                // Missing/rejected OCR frames never reach OnSnapshot, so its
+                // inactivity check cannot finalize an abandoned recording.
+                _sessionManager.CheckCaptureTimeout(DateTime.UtcNow);
             }
             catch (Exception ex)
             {
