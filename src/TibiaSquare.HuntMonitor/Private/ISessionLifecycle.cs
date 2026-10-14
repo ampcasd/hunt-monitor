@@ -18,6 +18,7 @@ public interface ISessionLifecycle
 
     void RecoverUnfinishedSessions();
     void OnSnapshot(HuntSnapshot snapshot, string characterName);
+    void CheckCaptureTimeout(DateTime now) { }
     void OnWindowLost();
     void OnShutdown();
     bool EndSessionManually();
