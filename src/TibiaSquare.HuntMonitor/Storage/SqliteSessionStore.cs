@@ -9,10 +9,14 @@ public record ScreenshotRecord(long Id, int SessionTimeSeconds, long? RawXpPerHo
 public sealed class SqliteSessionStore : IDisposable
 {
     private readonly SqliteConnection _connection;
+    private readonly TimeProvider _time;
 
-    public SqliteSessionStore(SqliteConnection connection)
+    public SqliteSessionStore(SqliteConnection connection) : this(connection, TimeProvider.System) { }
+
+    public SqliteSessionStore(SqliteConnection connection, TimeProvider timeProvider)
     {
         _connection = connection;
+        _time = timeProvider;
     }
 
     public void CreateSession(HuntSession session)
@@ -49,7 +53,7 @@ public sealed class SqliteSessionStore : IDisposable
             WHERE id = @id
             """;
         cmd.Parameters.AddWithValue("@id", sessionId);
-        cmd.Parameters.AddWithValue("@ended", DateTime.UtcNow.ToString("o"));
+        cmd.Parameters.AddWithValue("@ended", _time.GetUtcNow().UtcDateTime.ToString("o"));
         cmd.Parameters.AddWithValue("@reason", endReason);
         cmd.Parameters.AddWithValue("@duration", activeDurationSeconds);
         AddBaselineParameters(cmd, baseline);
@@ -58,7 +62,7 @@ public sealed class SqliteSessionStore : IDisposable
 
     public long InsertSnapshot(string sessionId, HuntSnapshot snapshot, DateTime sessionStartUtc)
     {
-        var now = DateTime.UtcNow;
+        var now = _time.GetUtcNow().UtcDateTime;
         var elapsedSeconds = (int)(now - sessionStartUtc).TotalSeconds;
 
         using var cmd = _connection.CreateCommand();
@@ -302,7 +306,9 @@ public sealed class SqliteSessionStore : IDisposable
         return sessions;
     }
 
-    public List<StoredSnapshot> GetAllSnapshots(string sessionId)
+    public List<StoredSnapshot> GetAllSnapshots(string sessionId) => GetAllSnapshots(sessionId, null);
+
+    public List<StoredSnapshot> GetAllSnapshots(string sessionId, DateTime? beforeUtc)
     {
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
@@ -310,10 +316,11 @@ public sealed class SqliteSessionStore : IDisposable
                    loot, supplies, balance, damage, damage_per_hour, healing, healing_per_hour,
                    stamina, ocr_provenance
             FROM hunt_snapshots
-            WHERE session_id = @sessionId
+            WHERE session_id = @sessionId AND (@before IS NULL OR timestamp_utc < @before)
             ORDER BY id ASC
             """;
         cmd.Parameters.AddWithValue("@sessionId", sessionId);
+        cmd.Parameters.AddWithValue("@before", (object?)beforeUtc?.ToString("o") ?? DBNull.Value);
 
         var snapshots = new List<StoredSnapshot>();
         using var reader = cmd.ExecuteReader();
@@ -353,6 +360,10 @@ public sealed class SqliteSessionStore : IDisposable
     /// </summary>
     public void SplitSession(string oldSessionId, string newSessionId, string characterName,
         DateTime splitAt, DateTime oldSessionStart, SessionBaseline? baseline = null)
+        => SplitSession(oldSessionId, newSessionId, characterName, splitAt, oldSessionStart, baseline, null);
+
+    public void SplitSession(string oldSessionId, string newSessionId, string characterName,
+        DateTime splitAt, DateTime oldSessionStart, SessionBaseline? baseline, SessionBaseline? newBaseline)
     {
         using var transaction = _connection.BeginTransaction();
 
@@ -361,12 +372,16 @@ public sealed class SqliteSessionStore : IDisposable
         {
             cmd.Transaction = transaction;
             cmd.CommandText = """
-                INSERT INTO hunt_sessions (id, character_name, started_at_utc, active_duration_seconds, is_synced)
-                VALUES (@id, @name, @started, 0, 0)
+                INSERT INTO hunt_sessions (id, character_name, started_at_utc, active_duration_seconds, is_synced,
+                    baseline_xp_gain, baseline_loot, baseline_supplies, baseline_balance,
+                    baseline_damage, baseline_healing, baseline_killed_monsters)
+                VALUES (@id, @name, @started, 0, 0, @baselineXpGain, @baselineLoot, @baselineSupplies,
+                    @baselineBalance, @baselineDamage, @baselineHealing, @baselineMonsters)
                 """;
             cmd.Parameters.AddWithValue("@id", newSessionId);
             cmd.Parameters.AddWithValue("@name", characterName);
             cmd.Parameters.AddWithValue("@started", splitAt.ToString("o"));
+            AddBaselineParameters(cmd, newBaseline);
             cmd.ExecuteNonQuery();
         }
 
@@ -386,6 +401,21 @@ public sealed class SqliteSessionStore : IDisposable
             cmd.Parameters.AddWithValue("@newSessionId", newSessionId);
             cmd.Parameters.AddWithValue("@oldSessionId", oldSessionId);
             cmd.Parameters.AddWithValue("@splitAt", splitAt.ToString("o"));
+            cmd.ExecuteNonQuery();
+        }
+
+        // Screenshots follow their observations into the retrospective session.
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.Transaction = transaction;
+            cmd.CommandText = """
+                UPDATE session_screenshots
+                SET session_id = @newId, session_time_seconds = session_time_seconds - @offset
+                WHERE session_id = @oldId AND session_time_seconds >= @offset
+                """;
+            cmd.Parameters.AddWithValue("@newId", newSessionId);
+            cmd.Parameters.AddWithValue("@oldId", oldSessionId);
+            cmd.Parameters.AddWithValue("@offset", (int)(splitAt - oldSessionStart).TotalSeconds);
             cmd.ExecuteNonQuery();
         }
 
